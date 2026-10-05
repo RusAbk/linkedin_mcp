@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"></head>
+<body>
+  <input type="text" aria-label="Keywords" placeholder="Search keywords">
+  <button id="reset" aria-label="Clear all filter values">Reset</button>
+  <button id="all">See all filters</button>
+  <div id="filters"></div>
+  <ul id="results"></ul>
+  <script>
+    const people = [
+      { id: 'stanford-vietnam', school: 'Stanford University', location: 'Vietnam' },
+      { id: 'harvard-vietnam', school: 'Harvard University', location: 'Vietnam' },
+      { id: 'stanford-usa', school: 'Stanford University', location: 'United States' },
+      { id: 'medical-vietnam', school: 'Stanford University School of Medicine', location: 'Vietnam' },
+      { id: 'polytechnique-france', school: 'École Polytechnique (Paris)', location: 'France' },
+    ];
+    const selected = { SCHOOL: [], GEOGRAPHY: [] };
+    const clicks = [];
+    window.filterClicks = clicks;
+    window.retainSelection = true;
+    window.schoolChoices = ['Stanford University School of Medicine', 'Stanford University', 'Harvard University'];
+    function renderResults() {
+      const matching = people.filter(person =>
+        (!selected.SCHOOL.length || selected.SCHOOL.includes(person.school)) &&
+        (!selected.GEOGRAPHY.length || selected.GEOGRAPHY.includes(person.location)));
+      document.getElementById('results').replaceChildren(...matching.map(person => {
+        const card = document.createElement('li');
+        const link = document.createElement('a');
+        link.href = '/sales/lead/' + person.id;
+        link.dataset.anonymize = 'person-name';
+        link.textContent = person.id;
+        card.append(link);
+        return card;
+      }));
+      if (!matching.length) document.getElementById('results').textContent = 'No results';
+    }
+    function makeFilter(key, label, uiLabel, choices, hidden) {
+      const panel = document.createElement('fieldset');
+      panel.dataset.xSearchFilter = key;
+      panel.hidden = hidden;
+      const trigger = document.createElement('button');
+      trigger.dataset.xSearchFilter = 'container-toggle';
+      trigger.textContent = label;
+      trigger.setAttribute('aria-expanded', 'false');
+      const pills = document.createElement('div');
+      const content = document.createElement('div');
+      content.hidden = true;
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.placeholder = 'Add ' + label;
+      const options = document.createElement('div');
+      function suggestions() {
+        const values = key === 'SCHOOL' ? window.schoolChoices : choices;
+        options.replaceChildren(...values.filter(value =>
+          value.toLowerCase().includes(input.value.toLowerCase()) && !selected[key].includes(value)).map(value => {
+          const option = document.createElement('button');
+          option.setAttribute('aria-label', 'Include “' + value + '” in ' + uiLabel + ' filter');
+          option.textContent = value;
+          option.onclick = () => {
+            clicks.push({ key, value });
+            if (window.retainSelection) {
+              selected[key].push(value);
+              const pill = document.createElement('button');
+              pill.setAttribute('aria-label', 'Remove ' + uiLabel + ' filter: “' + value + '”');
+              pill.textContent = value;
+              pills.append(pill);
+            }
+            // Match Sales Navigator: selecting a suggestion collapses and rerenders the input.
+            input.value = '';
+            content.hidden = true;
+            trigger.setAttribute('aria-expanded', 'false');
+            renderResults();
+          };
+          return option;
+        }));
+      }
+      input.oninput = suggestions;
+      trigger.onclick = () => {
+        content.hidden = !content.hidden;
+        trigger.setAttribute('aria-expanded', String(!content.hidden));
+        suggestions();
+      };
+      content.append(input, options);
+      panel.append(trigger, pills, content);
+      document.getElementById('filters').append(panel);
+      return { panel, pills, content, trigger };
+    }
+    const school = makeFilter('SCHOOL', 'School', 'School', [], true);
+    const geography = makeFilter('GEOGRAPHY', 'Geography', 'Region', ['Vietnam', 'United States'], false);
+    document.getElementById('all').onclick = () => { school.panel.hidden = false; };
+    document.getElementById('reset').onclick = () => {
+      for (const key of Object.keys(selected)) selected[key] = [];
+      for (const filter of [school, geography]) {
+        filter.pills.replaceChildren();
+        filter.content.hidden = true;
+        filter.trigger.setAttribute('aria-expanded', 'false');
+      }
+      renderResults();
+    };
+    renderResults();
+  </script>
+</body>
+</html>

@@ -1,0 +1,35 @@
+{
+  "name": "linkedin-sales-navigator-agent-connector",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local MCP connector for scripted LinkedIn Sales Navigator workflows",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test test/**/*.test.ts",
+    "login": "node --env-file-if-exists=.env --import tsx src/cli.ts login",
+    "doctor": "node --env-file-if-exists=.env --import tsx src/cli.ts doctor",
+    "inspect": "node --env-file-if-exists=.env --import tsx src/cli.ts inspect",
+    "search": "node --env-file-if-exists=.env --import tsx src/cli.ts search",
+    "worker": "node --env-file-if-exists=.env dist/src/browser-worker.js",
+    "worker:dev": "node --env-file-if-exists=.env --import tsx src/browser-worker.ts",
+    "worker:status": "node --env-file-if-exists=.env --import tsx src/cli.ts worker-status",
+    "worker:stop": "node --env-file-if-exists=.env --import tsx src/cli.ts worker-stop",
+    "start": "node --env-file-if-exists=.env dist/src/mcp-server.js",
+    "dev": "node --env-file-if-exists=.env --import tsx src/mcp-server.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.0.0",
+    "playwright": "^1.55.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

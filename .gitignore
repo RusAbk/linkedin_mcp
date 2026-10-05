@@ -1,0 +1,30 @@
+# Dependencies and generated build files
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Local sessions, worker tokens, operation database and diagnostics
+.data/
+
+# Local configuration and secrets (keep the example)
+.env
+.env.*
+!.env.example
+
+# Test output and caches
+playwright-report/
+test-results/
+coverage/
+.cache/
+.npm/
+
+# Runtime logs
+*.log
+
+# Editor and operating system files
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+Desktop.ini
