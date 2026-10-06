@@ -162,6 +162,7 @@ export class BrowserManager {
     if (this.context) return this.context;
     await fs.mkdir(this.config.profileDir, { recursive: true });
     this.context = await chromium.launchPersistentContext(this.config.profileDir, {
+      timeout: this.config.browserLaunchTimeoutMs,
       headless: this.config.headless,
       ...(this.config.browserChannel ? { channel: this.config.browserChannel } : {}),
       locale: this.config.locale,

@@ -8,7 +8,8 @@
     "check": "tsc -p tsconfig.json --noEmit",
     "build": "tsc -p tsconfig.json && node scripts/copy-public.mjs",
     "start": "node --env-file-if-exists=.env dist/web/src/main.js",
-    "test": "node --import tsx --test test/*.test.ts"
+    "test": "node --import tsx --test test/*.test.ts",
+    "doctor": "node scripts/browser-doctor.mjs"
   },
   "engines": { "node": ">=24" }
 }

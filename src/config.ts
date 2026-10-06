@@ -16,6 +16,7 @@ export interface AppConfig {
   browserChannel: "chrome" | "msedge" | undefined;
   defaultTimeoutMs: number;
   navigationTimeoutMs: number;
+  browserLaunchTimeoutMs: number;
   workerMode: WorkerMode;
   workerHost: string;
   workerPort: number;
@@ -68,6 +69,8 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
       overrides.defaultTimeoutMs ?? numberEnv(process.env.LINKEDIN_DEFAULT_TIMEOUT_MS, 15_000),
     navigationTimeoutMs:
       overrides.navigationTimeoutMs ?? numberEnv(process.env.LINKEDIN_NAVIGATION_TIMEOUT_MS, 45_000),
+    browserLaunchTimeoutMs:
+      overrides.browserLaunchTimeoutMs ?? numberEnv(process.env.LINKEDIN_BROWSER_LAUNCH_TIMEOUT_MS, 20_000),
     workerMode:
       overrides.workerMode ?? (process.env.LINKEDIN_WORKER_MODE === "embedded" ? "embedded" : "daemon"),
     workerHost: overrides.workerHost ?? process.env.LINKEDIN_WORKER_HOST ?? "127.0.0.1",

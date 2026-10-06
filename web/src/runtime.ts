@@ -8,6 +8,8 @@ import { SerialQueue } from "../../src/browser/serial-queue.js";
 import type { User } from "./users.js";
 import { LoginScreen } from "./login-screen.js";
 import { loginPageState } from "./login-navigation.js";
+import { browserTimeout } from "./browser-timeout.js";
+import { randomUUID } from "node:crypto";
 
 export interface LoginFrame { image?: string; version?: number; width: number; height: number; url: string; complete: boolean; blocked?: boolean }
 export type BrowserInput = { type: "click"; x: number; y: number } | { type: "text"; text: string } | { type: "key"; key: string } | { type: "scroll"; delta: number };
@@ -62,26 +64,34 @@ class Runtime implements UserRuntime {
     });
   }
   async openLogin() {
+    const trace = randomUUID().slice(0, 8), started = performance.now();
+    const stage = (name: string) => console.info(`LinkedIn login ${trace}: ${name} (${Math.round(performance.now() - started)}ms)`);
+    stage("queued");
     await this.queue.run(async () => {
+      stage("preparing Chrome");
       await this.stopScreen();
       await this.app.browser.runExclusive(async page => {
+        stage("Chrome page ready");
         const screen = new LoginScreen(page);
         try {
           await screen.start();
+          stage("frame stream ready");
           // Resume verification instead of restarting it after a portal error.
           // Start rendering first and wait only for the navigation response.
           if (loginPageState(page.url()) === "external") await page.goto("https://www.linkedin.com/login", { waitUntil: "commit", timeout: 15_000 });
+          stage("navigation committed");
           this.screen = screen;
         }
         catch (error) { await screen.close(); throw error; }
       });
       this.loginUntil = Date.now() + 15 * 60_000;
+      stage("ready");
     });
   }
   private async loginTask<T>(task: (page: Page) => Promise<T>): Promise<T> {
     return this.queue.run(async () => {
       if (this.loginUntil <= Date.now()) throw new ConnectorError("AUTH_REQUIRED", "Нажмите «Войти в LinkedIn», чтобы открыть вход снова.");
-      return this.app.browser.runExclusive(async page => { await page.bringToFront(); return task(page); });
+      return this.app.browser.runExclusive(async page => { await browserTimeout(page.bringToFront(), 5_000, "Chrome не отвечает на ввод. Закройте браузер и откройте вход снова."); return task(page); });
     });
   }
   async frame(): Promise<LoginFrame> {
