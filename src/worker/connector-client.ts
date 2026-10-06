@@ -8,7 +8,7 @@ export function createConnectorClient(overrides: Partial<AppConfig> = {}): Conne
   return config.workerMode === "embedded" ? new EmbeddedConnectorClient(createApp(config)) : new WorkerClient(config);
 }
 
-class EmbeddedConnectorClient implements ConnectorClient {
+export class EmbeddedConnectorClient implements ConnectorClient {
   private readonly startedAt = new Date();
 
   constructor(private readonly app: ConnectorApp) {}

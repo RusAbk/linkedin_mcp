@@ -1,0 +1,27 @@
+services:
+  linkedin-mcp:
+    build:
+      context: ..
+      dockerfile: web/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      WEB_HOST: 0.0.0.0
+      WEB_PORT: 3000
+      WEB_DATA_DIR: /data
+      LINKEDIN_BROWSER_CHANNEL: chrome
+      LINKEDIN_HEADLESS: "false"
+    ports:
+      - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_EXTERNAL_PORT:-3081}:3000"
+    volumes:
+      - linkedin-mcp-data:/data
+    shm_size: "1gb"
+    stop_grace_period: 5m
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+volumes:
+  linkedin-mcp-data:

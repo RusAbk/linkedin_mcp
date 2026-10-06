@@ -1,6 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { errorPayload } from "./errors.js";
 import {
   getProfileSchema,
@@ -177,7 +179,9 @@ async function main(): Promise<void> {
   await server.connect(transport);
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+}

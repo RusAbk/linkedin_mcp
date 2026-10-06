@@ -1,0 +1,14 @@
+{
+  "name": "linkedin-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file-if-exists=.env --import tsx src/main.ts",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json && node scripts/copy-public.mjs",
+    "start": "node --env-file-if-exists=.env dist/web/src/main.js",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "engines": { "node": ">=24" }
+}
