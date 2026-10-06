@@ -1,12 +1,14 @@
 const $ = selector => document.querySelector(selector);
 let csrf = '', currentUser = null, mcpUrl = '', personalToken = '', frame = null, timer = null, polling = false;
 let browserQueue = Promise.resolve();
+let browserEpoch = 0, browserStream = null, frameRequest = null, pendingInputs = 0;
 function notice(message, error = false) { $('#notice').hidden = false; $('#notice').textContent = message; $('#notice').classList.toggle('error', error); }
-function clearBrowser() { clearTimeout(timer); polling = false; frame = null; $('#browser-panel').hidden = true; $('#browser-image').removeAttribute('src'); $('#browser-text-form').reset(); }
+function stopVideo() { clearTimeout(timer); timer = null; browserStream?.close(); browserStream = null; frameRequest?.abort(); frameRequest = null; }
+function clearBrowser() { browserEpoch++; stopVideo(); polling = false; frame = null; $('#browser-panel').hidden = true; $('#browser-image').removeAttribute('src'); $('#browser-text-form').reset(); }
 function clearManualCopy() { $('#manual-copy').hidden = true; $('#manual-config').value = ''; }
 function leave() { csrf = ''; currentUser = null; personalToken = ''; clearBrowser(); clearManualCopy(); $('#configuration').hidden = true; $('#config-json').textContent = ''; $('#mcp-token').value = ''; $('#workspace').hidden = true; $('#login-view').hidden = false; $('#users-list').replaceChildren(); }
-async function api(path, data) {
-  const response = await fetch(`/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: data === undefined ? {} : { 'content-type': 'application/json', 'x-csrf-token': csrf }, ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
+async function api(path, data, signal) {
+  const response = await fetch(`/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: data === undefined ? {} : { 'content-type': 'application/json', 'x-csrf-token': csrf }, ...(data === undefined ? {} : { body: JSON.stringify(data) }), ...(signal ? { signal } : {}) });
   const payload = await response.json();
   if (!response.ok) { if (response.status === 401 && path !== 'login') leave(); throw new Error(`${payload.error?.code ?? response.status}: ${payload.error?.message ?? 'Ошибка запроса'}`); }
   return payload.data;
@@ -16,24 +18,62 @@ function bind(element, event, fn) { element.addEventListener(event, e => { e.pre
 async function busy(button, fn) { button.disabled = true; try { return await fn(); } finally { button.disabled = false; } }
 function node(tag, text, className) { const el = document.createElement(tag); if (text !== undefined) el.textContent = text; if (className) el.className = className; return el; }
 function serialBrowser(fn) { const operation = browserQueue.then(fn); browserQueue = operation.catch(() => {}); return operation; }
-async function refreshFrame() {
-  const result = await api('linkedin/frame');
-  if (!polling) return;
+async function showFrame(result, epoch) {
+  if (!polling || epoch !== browserEpoch) return;
   frame = result;
   if (result.complete) { clearBrowser(); notice('Вход завершён. Проверяю доступ к Sales Navigator…'); await status(); return; }
-  $('#browser-image').src = `data:image/jpeg;base64,${result.image}`; $('#browser-url').textContent = result.url;
+  if (result.image) $('#browser-image').src = `data:image/jpeg;base64,${result.image}`;
+  $('#browser-url').textContent = result.url;
 }
-async function poll() { if (!polling) return; try { await serialBrowser(refreshFrame); } catch (error) { polling = false; notice(error.message, true); } if (polling) timer = setTimeout(poll, 1600); }
-async function input(value) { return serialBrowser(async () => { await api('linkedin/input', value); if (polling) await refreshFrame(); }); }
+async function poll() {
+  if (!polling || document.hidden || browserStream || frameRequest) return;
+  const epoch = browserEpoch, request = new AbortController(); frameRequest = request;
+  try { await showFrame(await api('linkedin/frame', undefined, request.signal), epoch); }
+  catch (error) { if (!request.signal.aborted && epoch === browserEpoch) { polling = false; notice(error.message, true); } }
+  finally { if (frameRequest === request) frameRequest = null; }
+  if (polling && epoch === browserEpoch && !browserStream && !document.hidden) timer = setTimeout(poll, 800);
+}
+function startVideo() {
+  stopVideo();
+  if (!polling || document.hidden) return;
+  if (typeof EventSource === 'undefined') { $('#browser-stream-state').textContent = 'Обновление изображения'; void poll(); return; }
+  const epoch = browserEpoch, source = new EventSource('/api/linkedin/stream'); browserStream = source;
+  $('#browser-stream-state').textContent = 'Подключение к окну…';
+  source.addEventListener('frame', event => {
+    if (browserStream !== source || epoch !== browserEpoch) return;
+    $('#browser-stream-state').textContent = 'Прямой эфир';
+    Promise.resolve().then(() => showFrame(JSON.parse(event.data), epoch)).catch(error => notice(error.message, true));
+  });
+  source.addEventListener('problem', event => {
+    if (browserStream !== source) return;
+    const problem = JSON.parse(event.data); clearBrowser();
+    if (problem.code === 'SESSION_EXPIRED') leave();
+    notice(problem.message, true);
+  });
+  source.onerror = () => {
+    if (browserStream !== source || epoch !== browserEpoch) return;
+    source.close(); browserStream = null;
+    $('#browser-stream-state').textContent = 'Обновление изображения';
+    void poll();
+  };
+}
+async function input(value) {
+  if (!polling || !frame) return;
+  if (pendingInputs >= 20) throw new Error('Дождитесь выполнения предыдущих действий.');
+  const epoch = browserEpoch; pendingInputs++;
+  try { return await serialBrowser(async () => { if (polling && epoch === browserEpoch) await api('linkedin/input', value); }); }
+  finally { pendingInputs--; }
+}
 async function status() { const result = await api('linkedin/status', {}); $('#linkedin-state').textContent = { authenticated: 'LinkedIn и Sales Navigator подключены', auth_required: 'Нужен вход в LinkedIn', challenge_required: 'Нужна проверка LinkedIn', unavailable: 'Sales Navigator недоступен' }[result.state] ?? result.state; if (result.state === 'authenticated') notice('Сессия сохранена. Теперь создайте MCP-ключ и подключите агента.'); }
 bind($('#login-form'), 'submit', () => busy($('#login-form button'), async () => { try { await enter(await api('login', { username: $('#login-form').elements.username.value, password: $('#login-form').elements.password.value })); $('#login-form').reset(); $('#login-error').textContent = ''; } catch (error) { $('#login-error').textContent = error.message; } }));
 bind($('#logout'), 'click', async () => { await api('logout', {}); leave(); });
-bind($('#open-linkedin'), 'click', () => busy($('#open-linkedin'), async () => { clearBrowser(); await api('linkedin/open', {}); $('#browser-panel').hidden = false; polling = true; await poll(); $('#browser-panel').scrollIntoView({ behavior: 'smooth', block: 'start' }); }));
+bind($('#open-linkedin'), 'click', () => busy($('#open-linkedin'), async () => { clearBrowser(); const epoch = browserEpoch; await api('linkedin/open', {}); if (epoch !== browserEpoch) return; $('#browser-panel').hidden = false; polling = true; startVideo(); $('#browser-panel').scrollIntoView({ behavior: 'smooth', block: 'start' }); }));
 bind($('#check-linkedin'), 'click', () => busy($('#check-linkedin'), status));
 bind($('#close-browser'), 'click', () => busy($('#close-browser'), async () => { clearBrowser(); await api('linkedin/release', {}); notice('Браузер закрыт. Сохранённая сессия останется доступна агенту.'); }));
 bind($('#hide-browser'), 'click', async () => { clearBrowser(); await api('linkedin/finish', {}); });
-bind($('#refresh-browser'), 'click', async () => { polling = true; clearTimeout(timer); await poll(); });
-bind($('#browser-image'), 'click', async event => { if (!frame) return; const rect = $('#browser-image').getBoundingClientRect(); await input({ type: 'click', x: Math.min(frame.width - 1, Math.max(0, (event.clientX - rect.left) * frame.width / rect.width)), y: Math.min(frame.height - 1, Math.max(0, (event.clientY - rect.top) * frame.height / rect.height)) }); $('#browser-text-form').elements.text.focus(); });
+bind($('#refresh-browser'), 'click', () => { polling = true; startVideo(); });
+bind($('#browser-image'), 'click', async event => { if (!frame) return; const rect = $('#browser-image').getBoundingClientRect(); $('#browser-text-form').elements.text.focus(); await input({ type: 'click', x: Math.min(frame.width - 1, Math.max(0, (event.clientX - rect.left) * frame.width / rect.width)), y: Math.min(frame.height - 1, Math.max(0, (event.clientY - rect.top) * frame.height / rect.height)) }); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) stopVideo(); else if (polling) startVideo(); });
 bind($('#browser-text-form'), 'submit', () => busy($('#browser-text-form button'), async () => { const field = $('#browser-text-form').elements.text; const text = field.value; field.value = ''; if (text) await input({ type: 'text', text }); }));
 for (const button of document.querySelectorAll('[data-key]')) bind(button, 'click', () => input({ type: 'key', key: button.dataset.key }));
 bind($('#scroll-up'), 'click', () => input({ type: 'scroll', delta: -500 }));

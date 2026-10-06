@@ -6,8 +6,9 @@ import type { ConnectorClient } from "../../src/worker/protocol.js";
 import { ConnectorError } from "../../src/errors.js";
 import { SerialQueue } from "../../src/browser/serial-queue.js";
 import type { User } from "./users.js";
+import { LoginScreen } from "./login-screen.js";
 
-export interface LoginFrame { image?: string; width: number; height: number; url: string; complete: boolean }
+export interface LoginFrame { image?: string; version?: number; width: number; height: number; url: string; complete: boolean }
 export type BrowserInput = { type: "click"; x: number; y: number } | { type: "text"; text: string } | { type: "key"; key: string } | { type: "scroll"; delta: number };
 export interface UserRuntime {
   client: ConnectorClient;
@@ -23,6 +24,7 @@ class Runtime implements UserRuntime {
   private readonly app: ConnectorApp;
   private readonly queue = new SerialQueue();
   private loginUntil = 0;
+  private screen: LoginScreen | null = null;
   private pending = 0;
   readonly client: ConnectorClient;
   constructor(user: User, dataRoot: string, projectRoot: string) {
@@ -61,24 +63,35 @@ class Runtime implements UserRuntime {
   }
   async openLogin() {
     await this.queue.run(async () => {
-      await this.app.browser.runExclusive(async page => { await page.goto("https://www.linkedin.com/login", { waitUntil: "domcontentloaded" }); });
+      await this.stopScreen();
+      await this.app.browser.runExclusive(async page => {
+        await page.goto("https://www.linkedin.com/login", { waitUntil: "domcontentloaded" });
+        const screen = new LoginScreen(page);
+        try { await screen.start(); this.screen = screen; }
+        catch (error) { await screen.close(); throw error; }
+      });
       this.loginUntil = Date.now() + 15 * 60_000;
     });
   }
   private async loginTask<T>(task: (page: Page) => Promise<T>): Promise<T> {
     return this.queue.run(async () => {
       if (this.loginUntil <= Date.now()) throw new ConnectorError("AUTH_REQUIRED", "Нажмите «Войти в LinkedIn», чтобы открыть вход снова.");
-      return this.app.browser.runExclusive(task);
+      return this.app.browser.runExclusive(async page => { await page.bringToFront(); return task(page); });
     });
   }
-  frame() {
-    return this.loginTask(async page => {
-      const viewport = page.viewportSize() ?? { width: 1440, height: 1000 };
-      const complete = /^https:\/\/(?:[a-z0-9-]+\.)?linkedin\.com\/(?:feed|sales\/(?!login)|in\/)/i.test(page.url());
-      if (complete) { this.loginUntil = 0; return { ...viewport, url: page.url(), complete }; }
-      if (!loginUrl(page.url())) throw new ConnectorError("CHALLENGE_REQUIRED", "Страница входа не поддерживается. Обратитесь к администратору и проверьте журнал браузера.");
-      return { ...viewport, url: page.url(), complete, image: (await page.screenshot({ type: "jpeg", quality: 75 })).toString("base64") };
-    });
+  async frame(): Promise<LoginFrame> {
+    const screen = this.screen;
+    if (this.loginUntil <= Date.now() || !screen || screen.page.isClosed()) {
+      await this.stopScreen();
+      throw new ConnectorError("AUTH_REQUIRED", "Нажмите «Войти в LinkedIn», чтобы открыть вход снова.");
+    }
+    const page = screen.page, viewport = page.viewportSize() ?? { width: 1440, height: 1000 };
+    const url = page.url();
+    const complete = /^https:\/\/(?:[a-z0-9-]+\.)?linkedin\.com\/(?:feed|sales\/(?!login)|in\/)/i.test(url);
+    if (complete) { this.loginUntil = 0; await this.stopScreen(); return { ...viewport, url, complete }; }
+    if (!loginUrl(url)) throw new ConnectorError("CHALLENGE_REQUIRED", "Страница входа не поддерживается. Обратитесь к администратору и проверьте журнал браузера.");
+    // Cached frames are read independently of input/navigation operations.
+    return { ...viewport, url, complete, ...screen.read() };
   }
   input(input: BrowserInput) {
     return this.loginTask(async page => {
@@ -89,8 +102,9 @@ class Runtime implements UserRuntime {
       if (input.type === "scroll") await page.mouse.wheel(0, input.delta);
     });
   }
-  async finishLogin() { await this.queue.run(async () => { this.loginUntil = 0; }); }
-  async close() { await this.queue.run(() => this.app.close()); }
+  private async stopScreen() { const screen = this.screen; this.screen = null; await screen?.close(); }
+  async finishLogin() { await this.queue.run(async () => { this.loginUntil = 0; await this.stopScreen(); }); }
+  async close() { await this.queue.run(async () => { this.loginUntil = 0; await this.stopScreen(); await this.app.close(); }); }
 }
 
 export class RuntimePool {

@@ -17,7 +17,7 @@ test("HTTP clipboard fallback selects the personal config and clears it on logou
     };
     const token = `ln_${"a".repeat(64)}`;
     vm.runInNewContext(source, {
-      document: { querySelector: element, querySelectorAll() { return []; } },
+      document: { querySelector: element, querySelectorAll() { return []; }, addEventListener() {} },
       navigator: { clipboard },
       clearTimeout, setTimeout,
       async fetch(url: string) {

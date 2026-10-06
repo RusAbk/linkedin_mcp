@@ -2,6 +2,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isIP } from "node:net";
+import { once } from "node:events";
+import { setTimeout as delay } from "node:timers/promises";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { createMcpServer } from "../../src/mcp-server.js";
@@ -49,8 +51,12 @@ export function createWebServer(options: WebOptions) {
   const sessions = new Map<string, Session>();
   const attempts = new Map<string, { count: number; expires: number }>();
   const requests = new Set<Promise<unknown>>();
+  const streams = new Map<AbortController, { sessionToken: string; userId: string }>();
   const cookie = (token: string, seconds: number) => `linkedin_web=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${seconds}${publicUrl.protocol === "https:" ? "; Secure" : ""}`;
-  function invalidate(userId: string) { for (const [key, session] of sessions) if (session.userId === userId) sessions.delete(key); }
+  function invalidate(userId: string) {
+    for (const [key, session] of sessions) if (session.userId === userId) sessions.delete(key);
+    for (const [controller, stream] of streams) if (stream.userId === userId) controller.abort();
+  }
   const server = createServer((req, res) => {
     const task = (async () => {
       for (const [id, session] of sessions) if (session.expires < Date.now()) sessions.delete(id);
@@ -108,7 +114,11 @@ export function createWebServer(options: WebOptions) {
       if (req.method === "POST" && req.headers["x-csrf-token"] !== session.csrf) throw new HttpError(403, "CSRF", "Обновите страницу и повторите запрос.");
       const success = (data: unknown) => json(res, 200, { ok: true, data });
       if (req.method === "GET" && url.pathname === "/api/me") return success({ user, csrf: session.csrf, mcpUrl: `${publicUrl.origin}/mcp` });
-      if (req.method === "POST" && url.pathname === "/api/logout") { sessions.delete(sessionToken); res.setHeader("set-cookie", cookie("", 0)); return success({}); }
+      if (req.method === "POST" && url.pathname === "/api/logout") {
+        sessions.delete(sessionToken);
+        for (const [controller, stream] of streams) if (stream.sessionToken === sessionToken) controller.abort();
+        res.setHeader("set-cookie", cookie("", 0)); return success({});
+      }
       if (req.method === "POST" && url.pathname === "/api/password") {
         const input = z.object({ currentPassword: z.string().max(512), password: z.string().min(16).max(512) }).strict().parse(await body(req));
         if (!options.users.authenticate(user.username, input.currentPassword)) throw new HttpError(403, "AUTH_REQUIRED", "Текущий пароль неверен.");
@@ -117,6 +127,39 @@ export function createWebServer(options: WebOptions) {
       if (req.method === "POST" && url.pathname === "/api/token") return success({ token: options.users.rotateToken(user.id), mcpUrl: `${publicUrl.origin}/mcp` });
       if (req.method === "POST" && url.pathname === "/api/token/revoke") { options.users.revokeToken(user.id); return success({}); }
       if (req.method === "POST" && url.pathname === "/api/linkedin/open") { await options.runtimes.get(user).openLogin(); return success({}); }
+      if (req.method === "GET" && url.pathname === "/api/linkedin/stream") {
+        if ([...streams.values()].filter(stream => stream.userId === user.id).length >= 2) throw new HttpError(429, "LIMIT_REACHED", "Закройте лишние окна авторизации.");
+        const runtime = options.runtimes.get(user), controller = new AbortController();
+        streams.set(controller, { sessionToken, userId: user.id });
+        const stop = () => controller.abort();
+        res.once("close", stop);
+        controller.signal.addEventListener("abort", () => { if (!res.writableEnded) res.end(); }, { once: true });
+        res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "x-accel-buffering": "no" });
+        res.flushHeaders();
+        let lastFrame = "", lastSent = Date.now();
+        try {
+          while (!controller.signal.aborted) {
+            if (sessions.get(sessionToken) !== session || session.expires <= Date.now() || options.users.get(user.id)?.disabled !== 0) {
+              res.write(`event: problem\ndata: ${JSON.stringify({ code: "SESSION_EXPIRED", message: "Войдите в портал снова." })}\n\n`);
+              break;
+            }
+            const frame = await runtime.frame();
+            if (controller.signal.aborted) break;
+            const identity = `${frame.url}:${frame.version ?? frame.image ?? ""}`;
+            if (frame.complete || identity !== lastFrame) {
+              lastFrame = identity;
+              lastSent = Date.now();
+              if (!res.write(`event: frame\ndata: ${JSON.stringify(frame)}\n\n`)) await once(res, "drain", { signal: controller.signal });
+              if (frame.complete) break;
+            } else if (Date.now() - lastSent >= 10_000) { res.write(": keepalive\n\n"); lastSent = Date.now(); }
+            // At most five deliveries per second; only the latest Chrome frame is retained.
+            await delay(200, undefined, { signal: controller.signal });
+          }
+        } catch (error) {
+          if (!controller.signal.aborted && !res.destroyed) res.write(`event: problem\ndata: ${JSON.stringify({ code: error instanceof ConnectorError ? error.code : "BROWSER_ERROR", message: error instanceof ConnectorError ? error.message : "Поток окна прерван. Откройте вход снова." })}\n\n`);
+        } finally { streams.delete(controller); res.off("close", stop); if (!res.writableEnded) res.end(); }
+        return;
+      }
       if (req.method === "GET" && url.pathname === "/api/linkedin/frame") return success(await options.runtimes.get(user).frame());
       if (req.method === "POST" && url.pathname === "/api/linkedin/input") { await options.runtimes.get(user).input(browserInput.parse(await body(req))); return success({}); }
       if (req.method === "POST" && url.pathname === "/api/linkedin/finish") { await options.runtimes.get(user).finishLogin(); return success({}); }
@@ -155,5 +198,5 @@ export function createWebServer(options: WebOptions) {
   });
   server.requestTimeout = 30_000;
   server.headersTimeout = 10_000;
-  return { server, async drain() { await Promise.allSettled([...requests]); } };
+  return { server, async drain() { for (const controller of streams.keys()) controller.abort(); await Promise.allSettled([...requests]); } };
 }

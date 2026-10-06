@@ -196,3 +196,43 @@ test("HTTPS IP cookies remain Secure without the HTTP opt-in", async () => {
     assert.equal((await response.json() as { data: { mcpUrl: string } }).data.mcpUrl, "https://203.0.113.10/mcp");
   } finally { await f.close(); }
 });
+
+test("live screen requires a session, remains private, allows input and closes on logout", async () => {
+  const f = await fixture();
+  const abort = new AbortController();
+  try {
+    assert.equal((await fetch(`${f.base}/api/linkedin/stream`)).status, 401);
+    const alice = await f.login("alice");
+    assert.equal((await fetch(`${f.base}/api/linkedin/stream`, { headers: { ...alice, origin: "https://evil.example" } })).status, 403);
+    const response = await fetch(`${f.base}/api/linkedin/stream`, { headers: alice, signal: abort.signal });
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-type")!, /text\/event-stream/);
+    assert.equal(response.headers.get("x-accel-buffering"), "no");
+    assert.match(response.headers.get("cache-control")!, /no-store/);
+    const reader = response.body!.getReader();
+    const first = new TextDecoder().decode((await reader.read()).value);
+    assert.match(first, /event: frame/);
+    assert.match(first, /"url":"alice"/);
+    assert.doesNotMatch(first, /bob/);
+    assert.equal((await f.post("/api/linkedin/input", { ...alice, "x-csrf-token": "wrong" }, { type: "key", key: "Tab" })).status, 403);
+    // A live stream does not block a separate input request.
+    assert.equal((await f.post("/api/linkedin/input", alice, { type: "key", key: "Tab" })).status, 200);
+    assert.equal((await f.post("/api/logout", alice)).status, 200);
+    assert.equal((await reader.read()).done, true);
+  } finally { abort.abort(); await f.close(); }
+});
+
+test("blocking a user terminates an existing screen stream and stream count is bounded", async () => {
+  const f = await fixture(), abort = new AbortController();
+  try {
+    const alice = await f.login("alice"), admin = await f.login("admin");
+    const one = await fetch(`${f.base}/api/linkedin/stream`, { headers: alice, signal: abort.signal });
+    const two = await fetch(`${f.base}/api/linkedin/stream`, { headers: alice, signal: abort.signal });
+    const reader = one.body!.getReader(); await reader.read();
+    assert.equal((await fetch(`${f.base}/api/linkedin/stream`, { headers: alice })).status, 429);
+    assert.equal((await f.post("/api/admin/user", admin, { id: f.alice.id, disabled: true })).status, 200);
+    assert.equal((await reader.read()).done, true);
+    await two.body!.cancel();
+    assert.equal((await fetch(`${f.base}/api/linkedin/stream`, { headers: alice })).status, 401);
+  } finally { abort.abort(); await f.close(); }
+});
