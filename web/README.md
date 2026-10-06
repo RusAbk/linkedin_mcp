@@ -6,7 +6,7 @@
 
 ## Запуск на сервере
 
-Подробный сценарий для Ubuntu, от установки Docker до HTTPS: [пошаговая инструкция ниже](#пошагово-ubuntu-сервер-и-домен).
+Подробный сценарий для Ubuntu с командами и ожидаемыми результатами: [пошаговая инструкция ниже](#пошагово-ubuntu-сервер-и-домен).
 
 Нужны Linux x86_64, Docker Engine и Docker Compose. Образ устанавливает Google Chrome; сборка на ARM в этой конфигурации не поддерживается. Домен и внешний порт можно выбрать любые. У каждого Compose-проекта свои сеть и том; жёстко заданного имени контейнера нет.
 
@@ -41,45 +41,100 @@ docker compose --project-name linkedin-mcp --env-file web/.env -f web/compose.ya
 
 Порт HTTP приложения по умолчанию опубликован только на loopback. Снаружи доступен Nginx с HTTPS. Публичная административная панель защищена логином и паролем. MCP требует отдельный персональный ключ.
 
-## Пошагово: Ubuntu-сервер и домен
+## Пошагово Ubuntu сервер и домен
 
-Сценарий для Ubuntu Server 22.04 / 24.04 / 26.04 LTS на **amd64**, с Nginx на хосте. Пример адреса — `linkedin.example.com`, порт приложения — `3081`. Замените домен, IP сервера и SSH-пользователя на свои значения. Если Docker или Nginx уже обслуживают другие приложения, используйте существующую установку; для этого проекта добавляется отдельный виртуальный хост.
+Эти шаги устанавливают проект на Ubuntu Server 22.04, 24.04 или 26.04 LTS с архитектурой **amd64**. Основной маршрут использует Nginx на хосте, отдельный домен и Docker-контейнер с локальным портом. Если Nginx уже работает в контейнере, используйте отдельную ветку в конце раздела.
 
-### 1. Направить домен на сервер
+Выполняйте блоки последовательно. Проверка после каждого блока показывает, можно ли переходить дальше. Команды установки Docker соответствуют [официальной инструкции Docker](https://docs.docker.com/engine/install/ubuntu/), выпуск сертификата — [инструкции Certbot для Nginx](https://certbot.eff.org/instructions?ws=nginx&os=snap).
 
-В DNS-панели домена создайте запись:
+### Шаг 1 Подключиться к серверу
 
-| Тип | Имя | Значение |
-| --- | --- | --- |
-| A | linkedin | Публичный IPv4 вашего Ubuntu-сервера |
+**Где выполнять: PowerShell на вашем Windows-компьютере.**
 
-Для корневого домена вместо `linkedin` обычно используется `@`. Запись AAAA добавляйте только при настроенном IPv6 на этом же сервере. Старый AAAA, указывающий на другой сервер, может мешать выдаче сертификата.
+Замените значения в первых трёх строках. IP берётся из панели хостинга; SSH-пользователь обычно `ubuntu` или `root`.
 
-В сетевых правилах облачного провайдера разрешите входящие TCP 80 и 443, а также ваш SSH-порт. Порт 3081 оставьте локальным: к нему обращается Nginx.
-
-### 2. Подключиться и установить Docker
-
-На своём компьютере:
-
-```sh
-ssh ubuntu@SERVER_IP
+```powershell
+$ServerIp = 'ВАШ_IP_СЕРВЕРА'
+$SshUser = 'ubuntu'
+$SshPort = 22
+ssh -p $SshPort "$SshUser@$ServerIp"
 ```
 
-На сервере проверьте архитектуру и имеющийся Docker:
+При использовании отдельного SSH-ключа вместо последней строки:
 
-```sh
+```powershell
+ssh -i 'C:\Users\swiss\.ssh\ВАШ_КЛЮЧ' -p $SshPort "$SshUser@$ServerIp"
+```
+
+Ожидается приглашение командной строки Ubuntu, например `ubuntu@server:~$`. Следующие блоки с пометкой Bash выполняются **в этой SSH-сессии на сервере**. Команды с запросом пароля sudo используют пароль Ubuntu-пользователя.
+
+### Шаг 2 Проверить сервер и задать свои значения
+
+```bash
+. /etc/os-release
+printf '%s\n' "$PRETTY_NAME"
 dpkg --print-architecture
-sudo docker version
+sudo -v
+```
+
+Ожидается Ubuntu и `amd64`. Если архитектура `arm64`, текущий Dockerfile с Google Chrome не подходит — не продолжайте этот маршрут.
+
+Замените только домен в первой строке. Указывайте его без `https://`, пути и завершающего слеша:
+
+```bash
+DOMAIN='linkedin.example.com'
+APP_PORT='3081'
+APP_DIR="$HOME/apps/linkedin-mcp"
+COMPOSE_PROJECT='linkedin-mcp'
+printf 'Домен: %s\nПорт: %s\nКаталог: %s\n' "$DOMAIN" "$APP_PORT" "$APP_DIR"
+```
+
+Проверьте напечатанные значения. Все дальнейшие команды используют эти переменные. Если закроете SSH и подключитесь снова, повторите этот блок; после установки также выполните `cd "$APP_DIR"` и определение функции `dc` из шага 7.
+
+Для второй установки на том же сервере задайте другое значение `COMPOSE_PROJECT`, другой `APP_PORT` и другой каталог `APP_DIR`.
+
+### Шаг 3 Привязать домен в DNS
+
+**Где выполнять: DNS-панель регистратора или сервиса, который обслуживает DNS вашего домена.**
+
+Для `linkedin.example.com`:
+
+| Поле | Значение |
+| --- | --- |
+| Тип записи | A |
+| Имя или Host | linkedin |
+| Значение или Target | Публичный IPv4 этого Ubuntu-сервера |
+| TTL | Оставьте стандартный |
+
+Если используете основной домен `example.com`, имя записи обычно `@`. AAAA требуется только при рабочем IPv6 на этом же сервере. Уберите неверную AAAA для этого имени, если она указывает на другой адрес.
+
+В панели хостинга разрешите входящие **TCP 80, TCP 443 и ваш SSH-порт**. Порт приложения 3081 не открывайте снаружи: в этой конфигурации он доступен только на `127.0.0.1`.
+
+Вернитесь в SSH и установите служебные программы:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git curl ca-certificates openssl dnsutils
+dig +short A "$DOMAIN"
+dig +short AAAA "$DOMAIN"
+```
+
+Для A ожидается IP вашего сервера. Для AAAA допустим пустой вывод, если IPv6 не используется. Если вывод неверный, исправьте DNS и повторите проверку; к выпуску сертификата переходите только после правильного ответа DNS.
+
+### Шаг 4 Проверить или установить Docker
+
+Сначала:
+
+```bash
+sudo docker info
 sudo docker compose version
 ```
 
-Архитектура должна быть `amd64`. Если Docker и Compose уже работают, переходите к следующему шагу. Команды ниже предназначены для установки Docker на сервер, где его ещё нет; не переустанавливайте работающую контейнерную инфраструктуру ради этого приложения.
+Если обе команды работают, Docker уже установлен: переходите к шагу 5.
 
-Установка из [официального репозитория Docker для Ubuntu](https://docs.docker.com/engine/install/ubuntu/):
+**Следующий блок выполняется только на сервере без установленного Docker.** Если контейнеры других приложений уже работают, используйте существующую установку. При ошибке доступа или остановленной службе сначала проверьте `sudo systemctl status docker`.
 
-```sh
-sudo apt-get update
-sudo apt-get install -y ca-certificates curl
+```bash
 sudo install -d -m 0755 /etc/apt/keyrings
 sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
 sudo chmod a+r /etc/apt/keyrings/docker.asc
@@ -92,185 +147,458 @@ printf 'Types: deb\nURIs: https://download.docker.com/linux/ubuntu\nSuites: %s\n
 sudo apt-get update
 sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 sudo systemctl enable --now docker
+```
+
+Проверка:
+
+```bash
+sudo docker info
 sudo docker compose version
 ```
 
-Все команды Docker ниже используют `sudo`; добавление SSH-пользователя в группу Docker не требуется.
+Ожидается информация о сервере Docker и версия Compose. Если установка сообщает конфликт с `docker.io`, `containerd` или другими пакетами, разберите конфликт по официальной инструкции Docker; не удаляйте пакеты работающей контейнерной инфраструктуры вслепую.
 
-### 3. Перенести проект
+### Шаг 5 Скачать проект с GitHub
 
-Нужен **весь проект**, включая корневые `package.json`, `package-lock.json`, `tsconfig.json`, `src` и `web`. Только папки `web` недостаточно: она использует общее ядро.
+На сервере:
 
-На вашем Windows-компьютере, в PowerShell из папки `Linkedin`:
-
-```powershell
-tar --exclude=.git --exclude=node_modules --exclude=dist --exclude=.data --exclude=.env --exclude='.env.*' --exclude='*.log' -czf "$env:TEMP\linkedin-mcp.tar.gz" .
-scp "$env:TEMP\linkedin-mcp.tar.gz" ubuntu@SERVER_IP:~/linkedin-mcp.tar.gz
+```bash
+mkdir -p "$HOME/apps"
+git clone https://github.com/RusAbk/linkedin_mcp.git "$APP_DIR"
+cd "$APP_DIR"
+git log -1 --oneline
+ls package.json package-lock.json tsconfig.json src web/Dockerfile web/compose.yaml
 ```
 
-В архив не включаются локальные сессии, пароли и установленные зависимости. На сервере:
+Ожидается скачанный репозиторий и перечисленные файлы без ошибок. Нужен весь проект, потому что `web` импортирует ядро из `src`. Node.js и Chrome отдельно на Ubuntu-хост не устанавливаются.
 
-```sh
-mkdir -p ~/apps/linkedin-mcp
-tar -xzf ~/linkedin-mcp.tar.gz -C ~/apps/linkedin-mcp
-cd ~/apps/linkedin-mcp
+Если каталог уже содержит этот репозиторий, вместо повторного клонирования:
+
+```bash
+cd "$APP_DIR"
+git status --short
+git pull --ff-only origin main
 ```
 
-Далее команды Compose выполняются из этой папки. Node.js и Chrome на хосте устанавливать не нужно — они находятся в контейнере.
+Перед `git pull` проверьте, что нет ваших несохранённых изменений. Если репозиторий недоступен без авторизации GitHub, используйте свой настроенный доступ к GitHub или перенос архива из прежней установки. Не вставляйте GitHub-токен в URL команды.
 
-### 4. Задать конфигурацию
+### Шаг 6 Создать конфигурацию и пароль
 
-Создайте файл на сервере:
+Проверьте, свободен ли выбранный порт:
 
-```sh
-umask 077
+```bash
+sudo ss -ltnp "sport = :$APP_PORT"
+```
+
+Ожидается только строка заголовка без слушающего процесса. Если порт занят, задайте другой:
+
+```bash
+APP_PORT='3082'
+sudo ss -ltnp "sport = :$APP_PORT"
+```
+
+Следующий блок создаёт `web/.env` и генерирует пароль **только при отсутствии файла**. Его можно вставить целиком:
+
+```bash
+cd "$APP_DIR"
+if [ -e web/.env ]; then
+  printf 'web/.env уже существует. Проверьте его командой nano web/.env.\n'
+else
+  umask 077
+  ADMIN_PASSWORD="$(openssl rand -hex 24)"
+  cat > web/.env <<EOF
+WEB_PUBLIC_URL=https://$DOMAIN
+WEB_ADMIN_USER=admin
+WEB_ADMIN_PASSWORD=$ADMIN_PASSWORD
+WEB_BIND_ADDRESS=127.0.0.1
+WEB_EXTERNAL_PORT=$APP_PORT
+WEB_MAX_BROWSERS=8
+EOF
+  chmod 600 web/.env
+  printf 'Логин портала: admin\nПароль портала: %s\n' "$ADMIN_PASSWORD"
+  unset ADMIN_PASSWORD
+fi
+```
+
+Сохраните напечатанный пароль в менеджере паролей. При существующем `.env` проверьте домен и порт в редакторе:
+
+```bash
 nano web/.env
 ```
 
-Содержимое:
+В nano: `Ctrl+O`, затем Enter — сохранить; `Ctrl+X` — выйти.
 
-```dotenv
-WEB_PUBLIC_URL=https://linkedin.example.com
-WEB_ADMIN_USER=admin
-WEB_ADMIN_PASSWORD=ВСТАВЬТЕ_СЛУЧАЙНЫЙ_ПАРОЛЬ
-WEB_BIND_ADDRESS=127.0.0.1
-WEB_EXTERNAL_PORT=3081
-WEB_MAX_BROWSERS=8
+Проверка без вывода пароля:
+
+```bash
+grep -E '^(WEB_PUBLIC_URL|WEB_ADMIN_USER|WEB_BIND_ADDRESS|WEB_EXTERNAL_PORT|WEB_MAX_BROWSERS)=' web/.env
+stat -c '%a %n' web/.env
 ```
 
-Для пароля можно отдельно выполнить `openssl rand -hex 24` и вставить полученную строку. Сохраните пароль в своём менеджере паролей. Затем:
+Ожидается ваш HTTPS-домен, loopback-адрес, выбранный порт и права `600`. Если изменили настройки существующей установки, убедитесь, что переменные `DOMAIN` и `APP_PORT` в текущей SSH-сессии совпадают с файлом.
 
-```sh
-chmod 600 web/.env
-sudo ss -ltnp 'sport = :3081'
+Пароль в `WEB_ADMIN_PASSWORD` создаёт администратора только при пустой базе. Изменение этой строки после первого запуска не сбрасывает существующий пароль.
+
+### Шаг 7 Собрать и запустить контейнер
+
+Определите короткую команду `dc`, чтобы во всех вызовах использовались одни и те же каталог, проект и файл конфигурации:
+
+```bash
+dc() {
+  sudo docker compose \
+    --project-name "$COMPOSE_PROJECT" \
+    --env-file "$APP_DIR/web/.env" \
+    -f "$APP_DIR/web/compose.yaml" "$@"
+}
 ```
 
-Если порт 3081 занят, выберите свободный, например 3082, и используйте его и в `WEB_EXTERNAL_PORT`, и в `proxy_pass` Nginx. Пароль администратора применяется только при первом запуске с пустой базой.
+Проверьте Compose-конфигурацию без печати секретов:
 
-### 5. Собрать и запустить приложение
-
-```sh
-sudo docker compose --project-name linkedin-mcp --env-file web/.env -f web/compose.yaml up -d --build
-sudo docker compose --project-name linkedin-mcp --env-file web/.env -f web/compose.yaml ps
-curl --fail http://127.0.0.1:3081/healthz
+```bash
+dc config --quiet
 ```
 
-Ожидаемый ответ проверки: `{"ok":true}`. Первая сборка скачивает зависимости и Chrome. При ошибке:
+Ожидается отсутствие ошибок. Затем:
 
-```sh
-sudo docker compose --project-name linkedin-mcp --env-file web/.env -f web/compose.yaml logs --tail=100 linkedin-mcp
+```bash
+dc build
+dc up -d
+dc ps
 ```
 
-### 6. Добавить домен в Nginx
+Первая сборка скачивает зависимости и Chrome. Успешная сборка завершается без ошибки; после запуска сервис `linkedin-mcp` должен иметь состояние `Up`, затем `healthy`.
 
-Если Nginx ещё не установлен:
+Проверка HTTP внутри сервера:
 
-```sh
+```bash
+curl --fail --retry 12 --retry-connrefused --retry-delay 2 "http://127.0.0.1:$APP_PORT/healthz"
+printf '\n'
+```
+
+Ожидается `{"ok":true}`. Если его нет:
+
+```bash
+dc ps
+dc logs --tail=100 linkedin-mcp
+```
+
+Не переходите к Nginx, пока локальная проверка не работает.
+
+### Шаг 8 Проверить существующий Nginx
+
+```bash
+sudo ss -ltnp '( sport = :80 or sport = :443 )'
+command -v nginx
+sudo systemctl status nginx --no-pager
+```
+
+Если Nginx на хосте уже работает, используйте его и переходите к шагу 9.
+
+Если Nginx отсутствует и порты 80/443 свободны:
+
+```bash
 sudo apt-get install -y nginx
 sudo systemctl enable --now nginx
 ```
 
-Если порты 80/443 уже обслуживает Nginx в контейнере или другой прокси, добавьте домен в него по разделу выше вместо запуска второго Nginx на тех же портах.
+Проверка:
 
-Создайте отдельный конфигурационный файл из **HTTP-шаблона**:
-
-```sh
-sudo cp web/deploy/nginx-http.conf.example /etc/nginx/sites-available/linkedin-mcp
-sudo nano /etc/nginx/sites-available/linkedin-mcp
-```
-
-В файле измените `server_name linkedin.example.com;` на свой домен и при необходимости порт в `proxy_pass`. Активируйте сайт:
-
-```sh
-sudo ln -s /etc/nginx/sites-available/linkedin-mcp /etc/nginx/sites-enabled/linkedin-mcp
+```bash
 sudo nginx -t
-sudo systemctl reload nginx
+sudo systemctl is-active nginx
 ```
 
-Существующие сайты сохраняются: используется отдельный файл. При повторном выполнении шага уже созданную ссылку создавать снова не нужно. Начальный HTTP-шаблон позволяет запустить Nginx до получения сертификата; HTTPS-шаблон с путями к ещё не существующим сертификатам на этом этапе использовать не нужно.
+Ожидается успешная проверка конфигурации и `active`. Если порты заняты контейнерным Nginx, Nginx Proxy Manager, Traefik или другим прокси, не запускайте второй сервер на этих портах: используйте ветку для существующего контейнерного прокси ниже.
 
-Если на сервере активен UFW:
+### Шаг 9 Создать отдельный виртуальный хост
 
-```sh
-sudo ufw allow 80/tcp
-sudo ufw allow 443/tcp
+Проверьте, не существует ли файл для этого Compose-проекта:
+
+```bash
+sudo ls -l "/etc/nginx/sites-available/$COMPOSE_PROJECT" "/etc/nginx/sites-enabled/$COMPOSE_PROJECT"
+```
+
+При первой установке ожидается `No such file or directory`. Если файл уже есть, сначала просмотрите его: шаг ниже его заменит.
+
+```bash
+sudo cat "/etc/nginx/sites-available/$COMPOSE_PROJECT"
+```
+
+Создайте начальную HTTP-конфигурацию. Вставьте весь блок, включая завершающий `EOF`. Значения `$DOMAIN` и `$APP_PORT` подставятся автоматически; Nginx-переменные останутся в файле:
+
+```bash
+sudo tee "/etc/nginx/sites-available/$COMPOSE_PROJECT" >/dev/null <<EOF
+server {
+    listen 80;
+    server_name $DOMAIN;
+
+    client_max_body_size 64k;
+    location / {
+        proxy_pass http://127.0.0.1:$APP_PORT;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_buffering off;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+    }
+}
+EOF
+```
+
+Активируйте его, не заменяя чужую существующую ссылку:
+
+```bash
+if [ ! -e "/etc/nginx/sites-enabled/$COMPOSE_PROJECT" ] && [ ! -L "/etc/nginx/sites-enabled/$COMPOSE_PROJECT" ]; then
+  sudo ln -s "/etc/nginx/sites-available/$COMPOSE_PROJECT" "/etc/nginx/sites-enabled/$COMPOSE_PROJECT"
+fi
+sudo nginx -t
+```
+
+Только если проверка успешна:
+
+```bash
+sudo systemctl reload nginx
+curl --fail --header "Host: $DOMAIN" http://127.0.0.1/healthz
+printf '\n'
+```
+
+Ожидается `{"ok":true}`. Другие сайты Nginx находятся в своих конфигурациях и продолжают обслуживаться.
+
+### Шаг 10 Проверить доступ снаружи
+
+На Ubuntu:
+
+```bash
 sudo ufw status
 ```
 
-Если собираетесь впервые включать UFW, сначала разрешите ваш фактический SSH-порт и порты всех уже работающих приложений. Здесь включение firewall не выполняется. Настройка UFW описана в [документации Ubuntu](https://ubuntu.com/server/docs/how-to/security/firewalls/).
+Если UFW активен, добавьте только правила для сайта:
 
-### 7. Выпустить HTTPS-сертификат
-
-Убедитесь, что DNS уже указывает на сервер и по HTTP отвечает ваш Nginx:
-
-```sh
-sudo apt-get install -y dnsutils
-dig +short A linkedin.example.com
-dig +short AAAA linkedin.example.com
-curl --fail http://linkedin.example.com/healthz
+```bash
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
 ```
 
-Для новой установки Certbot используйте [официальную инструкцию Certbot для Nginx](https://certbot.eff.org/instructions?ws=nginx&os=snap):
+Если UFW неактивен, этот маршрут не включает его автоматически: включение требует учёта SSH и остальных приложений сервера. Независимо от UFW проверьте правила firewall в панели хостинга.
 
-```sh
+**Где выполнять следующую проверку: PowerShell на вашем компьютере, в отдельном окне.** Подставьте ваш домен:
+
+```powershell
+curl.exe --fail http://linkedin.example.com/healthz
+```
+
+Ожидается `{"ok":true}`. Это подтверждает доступ извне. Не вводите пароль портала по HTTP; этот адрес пока используется только для диагностики и выдачи сертификата.
+
+Если команда не работает, проверьте A/AAAA и доступ TCP 80. К HTTPS переходите после исправления.
+
+### Шаг 11 Выпустить HTTPS сертификат
+
+**Где выполнять: SSH-сессия на Ubuntu.**
+
+Проверьте, установлен ли Certbot:
+
+```bash
+command -v certbot
+test -x /snap/bin/certbot && /snap/bin/certbot --version
+```
+
+Если Certbot уже используется на сервере, сохраните его установку:
+
+```bash
+CERTBOT_BIN="$(command -v certbot)"
+```
+
+Если его ещё нет, установите:
+
+```bash
 sudo apt-get install -y snapd
 sudo snap install --classic certbot
-sudo /snap/bin/certbot --nginx -d linkedin.example.com --redirect
+CERTBOT_BIN='/snap/bin/certbot'
 ```
 
-Certbot запросит контактный email и согласие с условиями выдачи сертификата. Он добавит HTTPS в виртуальный хост этого домена и перенаправление HTTP → HTTPS. Если Certbot уже установлен и обслуживает другие домены, используйте существующую установку: достаточно выполнить `sudo certbot --nginx -d linkedin.example.com --redirect`, без установки второй копии.
+Проверка выбранного пути:
 
-После выпуска:
+```bash
+"$CERTBOT_BIN" --version
+```
 
-```sh
+Ожидается версия Certbot. Выпустите сертификат для вашего домена:
+
+```bash
+sudo "$CERTBOT_BIN" --nginx -d "$DOMAIN" --redirect
+```
+
+Во время диалога введите свой email, прочитайте и подтвердите условия выдачи сертификата. Certbot добавит TLS в виртуальный хост этого домена и перенаправление HTTP → HTTPS.
+
+Проверка:
+
+```bash
 sudo nginx -t
-curl --fail https://linkedin.example.com/healthz
-sudo /snap/bin/certbot renew --dry-run
+curl --fail "https://$DOMAIN/healthz"
+printf '\n'
+sudo "$CERTBOT_BIN" renew --dry-run
 ```
 
-Для уже установленного Certbot последнюю команду выполняйте через его обычный путь. Snap-установка настраивает регулярное продление; `--dry-run` проверяет возможность продления без замены рабочего сертификата. Для диагностики TLS также есть [инструкция Ubuntu](https://ubuntu.com/server/docs/how-to/security/obtain-tls-certificates/).
+Ожидаются успешная проверка Nginx, `{"ok":true}` и успешная тестовая проверка продления сертификатов. Snap-установка Certbot запускает регулярное продление.
 
-**Входите в портал только по HTTPS.** Адрес в `WEB_PUBLIC_URL` уже должен совпадать с вашим HTTPS-доменом; cookies портала рассчитаны на защищённое соединение.
+Если получаете `unauthorized` или `timeout`, проверьте DNS и доступ к порту 80 снаружи. Если Nginx не находит сайт, проверьте `server_name` и ссылку в `sites-enabled`.
 
-### 8. Создать пользователей и подключить агента
+### Шаг 12 Войти в портал и создать пользователя
 
-Откройте `https://linkedin.example.com`, войдите как администратор и создайте пользователей. Каждый пользователь входит в собственную учётную запись портала, авторизуется в LinkedIn и создаёт свой ключ. Адрес MCP для всех один — `https://linkedin.example.com/mcp`; ключ определяет, чья сессия используется.
+**Где выполнять: браузер на вашем компьютере.**
 
-Проверка защиты без ключа:
+1. Откройте `https://ваш-домен`.
+2. Введите логин `admin` и пароль, сохранённый на шаге 6.
+3. В разделе «Пользователи сервера» создайте логин и начальный пароль пользователя.
+4. Откройте отдельное приватное окно браузера и войдите под созданным пользователем.
+5. Нажмите «Войти в LinkedIn».
+6. В изображении браузера на сервере нажмите нужное поле LinkedIn. Введите email в поле под изображением и нажмите «Ввести в поле». Аналогично введите пароль, затем нажмите кнопку входа в изображении.
+7. При необходимости вручную пройдите 2FA или проверку LinkedIn в том же окне.
+8. Нажмите «Проверить сессию». Ожидается «LinkedIn и Sales Navigator подключены».
+9. Нажмите «Создать / заменить MCP-ключ» и «Скопировать конфигурацию».
 
-```sh
-curl -i https://linkedin.example.com/mcp
+Каждый пользователь выполняет авторизацию в собственном браузерном профиле. Аккаунты и журналы операций разделены. Если Sales Navigator недоступен, проверьте, есть ли у этого LinkedIn-аккаунта доступ к нему.
+
+### Шаг 13 Проверить удалённый MCP
+
+В SSH-сессии:
+
+```bash
+curl -i "https://$DOMAIN/mcp"
 ```
 
-Ожидается **401**, а не страница с данными. Для проверки инструментов с ключом, в Bash на сервере или другом компьютере:
+Ожидается **401**: запрос без персонального ключа отклоняется.
 
-```sh
+Сначала выполните **только эту строку**. После появления запроса вставьте персональный MCP-ключ из портала и нажмите Enter; ввод не отображается:
+
+```bash
 read -rsp 'Персональный MCP-ключ: ' MCP_KEY
+```
+
+После ввода ключа выполните следующий блок:
+
+```bash
 printf '\n'
 printf 'Authorization: Bearer %s\n' "$MCP_KEY" | curl --fail-with-body --header @- \
   --header 'Content-Type: application/json' \
   --header 'Accept: application/json, text/event-stream' \
   --header 'MCP-Protocol-Version: 2025-06-18' \
   --data '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
-  https://linkedin.example.com/mcp
+  "https://$DOMAIN/mcp"
 unset MCP_KEY
 ```
 
-Эта проверка выводит перечень восьми инструментов и не выполняет действий в LinkedIn. Затем вставьте персональную конфигурацию из портала в настройки вашего агента.
+Ожидается JSON с `result.tools` и восемью инструментами `linkedin_...`. Этот запрос не отправляет сообщения и не выполняет поиск.
 
-### Частые проблемы
+Вставьте скопированную конфигурацию в MCP-настройки агента. Адрес сервера — `https://ваш-домен/mcp`; заголовок — `Authorization: Bearer <персональный ключ>`. Клиент должен поддерживать Streamable HTTP и пользовательский Bearer-заголовок. OAuth-only клиенты в этой версии не поддерживаются.
 
-| Симптом | Что проверить |
+### Шаг 14 Обновление и обслуживание
+
+В новой SSH-сессии повторите значения из шага 2 и определение `dc` из шага 7. Затем:
+
+```bash
+cd "$APP_DIR"
+git status --short
+git pull --ff-only origin main
+dc build
+dc up -d
+dc ps
+curl --fail "https://$DOMAIN/healthz"
+```
+
+Проверьте рабочую папку перед обновлением и не затирайте собственные изменения.
+
+Посмотреть журналы:
+
+```bash
+dc logs --tail=100 linkedin-mcp
+```
+
+Следить за журналом до `Ctrl+C`:
+
+```bash
+dc logs -f --tail=100 linkedin-mcp
+```
+
+Остановить приложение, сохранив данные:
+
+```bash
+dc stop
+```
+
+Запустить снова:
+
+```bash
+dc up -d
+```
+
+После изменения `web/.env` используйте `dc up -d`: простой `restart` не применяет новые переменные окружения. Имя Compose-проекта сохраняйте тем же, чтобы использовался тот же том с пользователями и LinkedIn-сессиями. Не используйте `down -v` для обновления: эта команда удаляет постоянный том.
+
+### Если Nginx уже работает в Docker
+
+В этой ветке не устанавливайте Nginx на хосте и не выполняйте шаги 8–11 для хостового Nginx. DNS, запуск приложения и HTTPS-проверки остаются нужны.
+
+Сначала найдите контейнер прокси:
+
+```bash
+sudo docker ps --format 'table {{.Names}}\t{{.Ports}}'
+```
+
+Задайте его фактическое имя:
+
+```bash
+PROXY_CONTAINER='ИМЯ_ВАШЕГО_NGINX_КОНТЕЙНЕРА'
+sudo docker network inspect "${COMPOSE_PROJECT}_default" --format '{{.Name}}'
+sudo docker network connect "${COMPOSE_PROJECT}_default" "$PROXY_CONTAINER"
+```
+
+Ожидается существующая сеть этого приложения и успешное подключение прокси. Если прокси уже подключён к сети, повторная команда может сообщить, что endpoint уже существует; дополнительное подключение не требуется.
+
+В конфигурации **этого контейнерного прокси** направьте нужный домен на:
+
+```nginx
+proxy_pass http://linkedin-mcp:3000;
+proxy_buffering off;
+proxy_read_timeout 600s;
+```
+
+В Nginx Proxy Manager аналогичные поля: Scheme `http`, Forward Hostname `linkedin-mcp`, Forward Port `3000`; домен и SSL-сертификат задайте в его панели.
+
+Получайте сертификат тем способом, который уже используется вашим прокси. `127.0.0.1:3081` внутри контейнера прокси указывает на сам прокси, поэтому upstream здесь — `linkedin-mcp:3000`.
+
+Подключение через `docker network connect` относится к текущему контейнеру. Чтобы оно сохранялось после его пересоздания, внесите сеть `${COMPOSE_PROJECT}_default` как внешнюю в Compose-конфигурацию существующего прокси. Например, для проекта `linkedin-mcp`:
+
+```yaml
+services:
+  nginx:
+    networks:
+      - default
+      - linkedin_mcp
+
+networks:
+  linkedin_mcp:
+    external: true
+    name: linkedin-mcp_default
+```
+
+Здесь `nginx` нужно заменить на имя сервиса вашего прокси и объединить запись с его существующими сетями и volumes. Приложение и прокси должны работать на одном Docker-хосте. Нескольким экземплярам LinkedIn MCP на одной общей сети назначайте разные aliases.
+
+### Если что то не работает
+
+| Проверка или ошибка | Действие |
 | --- | --- |
-| `502 Bad Gateway` | Контейнер запущен; `/healthz` работает на loopback; порт в Nginx совпадает с `WEB_EXTERNAL_PORT`. |
-| Certbot не выдаёт сертификат | A/AAAA указывают на этот сервер; TCP 80 доступен извне; Nginx запущен; домен указан в `server_name`. |
-| `ORIGIN` при входе | `WEB_PUBLIC_URL` точно совпадает с протоколом, доменом и портом браузера. После изменения `.env` повторите `up -d`. |
-| MCP отвечает `401` | Передан актуальный Bearer-ключ; пользователь не заблокирован; ключ не был заменён/отозван. |
-| Открытие `/mcp` в браузере даёт `405` с ключом | Это нормально: инструменты вызываются POST-запросами Streamable HTTP. |
-| Пароль из `.env` не подходит после обновления | Bootstrap не меняет пароль существующего администратора; используйте ранее установленный пароль. |
-| Лимит браузеров | Закройте неиспользуемые браузеры через портал либо измените `WEB_MAX_BROWSERS` с учётом ресурсов сервера. |
-
-Инструкция подготовлена по конфигурации проекта и официальной документации; выполнение команд на конкретном Ubuntu-сервере в этой сессии не проверялось.
+| `git clone` сообщает, что каталог существует | Перейдите в каталог, проверьте `git status` и используйте `git pull --ff-only origin main`. |
+| `dc config --quiet` выдаёт ошибку | Проверьте `web/.env`, наличие файлов и значения переменных из шага 2. |
+| Локальный `/healthz` недоступен | Выполните `dc ps`, `dc logs --tail=100 linkedin-mcp`; проверьте, свободен ли порт. |
+| Nginx даёт `502` | Проверьте локальный `/healthz` и порт в `proxy_pass`. Для контейнерного Nginx проверьте общую сеть. |
+| Certbot не выдаёт сертификат | Проверьте A/AAAA, TCP 80, ответ HTTP с другого компьютера и точное совпадение домена с `server_name`. |
+| Портал даёт `ORIGIN` | `WEB_PUBLIC_URL` должен совпадать с адресом браузера. После исправления выполните `dc up -d`. |
+| Пароль администратора не подходит | При существующей базе используйте ранее установленный пароль; переменная bootstrap не сбрасывает его. |
+| MCP даёт `401` | Проверьте Bearer-заголовок, актуальность ключа и отсутствие блокировки пользователя. |
+| MCP даёт `405` при открытии в браузере с ключом | Это ожидаемо: инструменты вызываются POST-запросами. |
+| Лимит активных браузеров | Закройте неиспользуемые браузеры в портале или измените `WEB_MAX_BROWSERS` с учётом ресурсов сервера. |
 
 ## Первое подключение
 
