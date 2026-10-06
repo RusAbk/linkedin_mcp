@@ -9,7 +9,7 @@ function deferred<T>() { let resolve!: (value: T) => void; const promise = new P
 const settle = () => new Promise<void>(resolve => setImmediate(resolve));
 const image = (version: number) => ({ image: `jpeg-${version}`, version, width: 1440, height: 1000, url: "https://www.linkedin.com/login", complete: false });
 
-function ui(request: (url: string, options: { body?: string }) => Promise<unknown>, live = true) {
+function ui(request: (url: string, options: { body?: string; signal?: AbortSignal }) => Promise<unknown>, live = true) {
   class Element {
     value = ""; hidden = true; textContent = ""; src = ""; focused = false; disabled = false;
     listeners = new Map<string, (event: UiEvent) => void>();
@@ -38,7 +38,7 @@ function ui(request: (url: string, options: { body?: string }) => Promise<unknow
     ...(live ? { EventSource: Stream } : {}),
     setTimeout(callback: () => void) { timers.set(++timerId, callback); return timerId; },
     clearTimeout(id: number) { timers.delete(id); },
-    async fetch(url: string, options: { body?: string }) {
+    async fetch(url: string, options: { body?: string; signal?: AbortSignal }) {
       const data = url === "/api/me" ? { user: { username: "alice", role: "user", action_mode: "review" }, csrf: "csrf", mcpUrl: "http://localhost/mcp" } : await request(url, options);
       return { ok: true, async json() { return { data }; } };
     },
@@ -88,4 +88,39 @@ test("fallback refresh never blocks input and late frames cannot reopen a hidden
   assert.equal(app.element("#browser-image").src, "");
   assert.equal(app.element("#browser-panel").hidden, true);
   assert.equal(app.timers.size, 0);
+});
+
+test("a stalled startup shows progress immediately and releases the button on timeout", async () => {
+  const app = ui(async (url, options) => {
+    if (url === "/api/linkedin/open") return new Promise((_, reject) => {
+      options.signal!.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })), { once: true });
+    });
+    return {};
+  });
+  await settle(); await app.event("#open-linkedin");
+  assert.equal(app.element("#browser-panel").hidden, false);
+  assert.equal(app.element("#open-linkedin").disabled, true);
+  assert.match(app.element("#browser-stream-state").textContent, /Запускаем/);
+  for (const callback of app.timers.values()) callback(); await settle(); await settle();
+  assert.equal(app.element("#open-linkedin").disabled, false);
+  assert.match(app.element("#notice").textContent, /60 секунд/);
+  assert.equal(app.streams.length, 0);
+});
+
+test("post-verification redirects keep the window open until a signed-in frame", async () => {
+  let checked = 0;
+  const app = ui(async url => {
+    if (url === "/api/linkedin/status") { checked++; return { state: "authenticated" }; }
+    return {};
+  });
+  await settle(); await app.event("#open-linkedin");
+  const stream = app.streams[0]!;
+  for (const [index, url] of ["https://www.linkedin.com/checkpoint/challenge/verify", "https://www.linkedin.com/", "https://www.linkedin.com/home"].entries()) {
+    stream.emit("frame", { ...image(index + 1), url, blocked: false }); await settle();
+    assert.equal(stream.closed, false); assert.equal(app.element("#browser-panel").hidden, false);
+    assert.equal(app.element("#browser-url").textContent, url);
+  }
+  stream.emit("frame", { ...image(4), url: "https://www.linkedin.com/feed/", complete: true }); await settle();
+  assert.equal(stream.closed, true); assert.equal(checked, 1);
+  assert.match(app.element("#linkedin-state").textContent, /подключены/);
 });

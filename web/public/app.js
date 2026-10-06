@@ -1,10 +1,10 @@
 const $ = selector => document.querySelector(selector);
 let csrf = '', currentUser = null, mcpUrl = '', personalToken = '', frame = null, timer = null, polling = false;
 let browserQueue = Promise.resolve();
-let browserEpoch = 0, browserStream = null, frameRequest = null, pendingInputs = 0;
+let browserEpoch = 0, browserStream = null, frameRequest = null, openRequest = null, pendingInputs = 0;
 function notice(message, error = false) { $('#notice').hidden = false; $('#notice').textContent = message; $('#notice').classList.toggle('error', error); }
 function stopVideo() { clearTimeout(timer); timer = null; browserStream?.close(); browserStream = null; frameRequest?.abort(); frameRequest = null; }
-function clearBrowser() { browserEpoch++; stopVideo(); polling = false; frame = null; $('#browser-panel').hidden = true; $('#browser-image').removeAttribute('src'); $('#browser-text-form').reset(); }
+function clearBrowser() { browserEpoch++; openRequest?.abort(); openRequest = null; stopVideo(); polling = false; frame = null; $('#browser-panel').hidden = true; $('#browser-image').removeAttribute('src'); $('#browser-text-form').reset(); }
 function clearManualCopy() { $('#manual-copy').hidden = true; $('#manual-config').value = ''; }
 function leave() { csrf = ''; currentUser = null; personalToken = ''; clearBrowser(); clearManualCopy(); $('#configuration').hidden = true; $('#config-json').textContent = ''; $('#mcp-token').value = ''; $('#workspace').hidden = true; $('#login-view').hidden = false; $('#users-list').replaceChildren(); }
 async function api(path, data, signal) {
@@ -20,6 +20,8 @@ function node(tag, text, className) { const el = document.createElement(tag); if
 function serialBrowser(fn) { const operation = browserQueue.then(fn); browserQueue = operation.catch(() => {}); return operation; }
 async function showFrame(result, epoch) {
   if (!polling || epoch !== browserEpoch) return;
+  if (result.blocked && (!frame?.blocked || frame.url !== result.url)) notice('Браузер перешёл за пределы LinkedIn. Изображение доступно, но ввод отключён; текущий адрес показан над окном.', true);
+  else if (frame?.blocked && !result.blocked) notice('Страница LinkedIn снова доступна. Продолжите вход в окне.');
   frame = result;
   if (result.complete) { clearBrowser(); notice('Вход завершён. Проверяю доступ к Sales Navigator…'); await status(); return; }
   if (result.image) $('#browser-image').src = `data:image/jpeg;base64,${result.image}`;
@@ -41,7 +43,7 @@ function startVideo() {
   $('#browser-stream-state').textContent = 'Подключение к окну…';
   source.addEventListener('frame', event => {
     if (browserStream !== source || epoch !== browserEpoch) return;
-    $('#browser-stream-state').textContent = 'Прямой эфир';
+    $('#browser-stream-state').textContent = JSON.parse(event.data).image ? 'Прямой эфир' : 'Ожидаем первое изображение…';
     Promise.resolve().then(() => showFrame(JSON.parse(event.data), epoch)).catch(error => notice(error.message, true));
   });
   source.addEventListener('problem', event => {
@@ -59,6 +61,7 @@ function startVideo() {
 }
 async function input(value) {
   if (!polling || !frame) return;
+  if (frame.blocked) throw new Error('Ввод доступен только на HTTPS-странице LinkedIn. Проверьте адрес над окном.');
   if (pendingInputs >= 20) throw new Error('Дождитесь выполнения предыдущих действий.');
   const epoch = browserEpoch; pendingInputs++;
   try { return await serialBrowser(async () => { if (polling && epoch === browserEpoch) await api('linkedin/input', value); }); }
@@ -67,7 +70,23 @@ async function input(value) {
 async function status() { const result = await api('linkedin/status', {}); $('#linkedin-state').textContent = { authenticated: 'LinkedIn и Sales Navigator подключены', auth_required: 'Нужен вход в LinkedIn', challenge_required: 'Нужна проверка LinkedIn', unavailable: 'Sales Navigator недоступен' }[result.state] ?? result.state; if (result.state === 'authenticated') notice('Сессия сохранена. Теперь создайте MCP-ключ и подключите агента.'); }
 bind($('#login-form'), 'submit', () => busy($('#login-form button'), async () => { try { await enter(await api('login', { username: $('#login-form').elements.username.value, password: $('#login-form').elements.password.value })); $('#login-form').reset(); $('#login-error').textContent = ''; } catch (error) { $('#login-error').textContent = error.message; } }));
 bind($('#logout'), 'click', async () => { await api('logout', {}); leave(); });
-bind($('#open-linkedin'), 'click', () => busy($('#open-linkedin'), async () => { clearBrowser(); const epoch = browserEpoch; await api('linkedin/open', {}); if (epoch !== browserEpoch) return; $('#browser-panel').hidden = false; polling = true; startVideo(); $('#browser-panel').scrollIntoView({ behavior: 'smooth', block: 'start' }); }));
+bind($('#open-linkedin'), 'click', () => busy($('#open-linkedin'), async () => {
+  clearBrowser(); const epoch = browserEpoch, request = new AbortController(); openRequest = request;
+  const timeout = setTimeout(() => request.abort(), 60_000);
+  $('#browser-panel').hidden = false; $('#browser-stream-state').textContent = 'Запускаем ваш браузер…';
+  notice('Открываем окно LinkedIn. При первом запуске Chrome это может занять несколько секунд.');
+  $('#browser-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  try {
+    await api('linkedin/open', {}, request.signal);
+    if (epoch !== browserEpoch) return;
+    polling = true; startVideo(); notice('Окно открыто. Продолжите вход или проверку LinkedIn.');
+  } catch (error) {
+    if (epoch !== browserEpoch) return;
+    $('#browser-stream-state').textContent = 'Ошибка запуска окна';
+    if (error.name === 'AbortError') throw new Error('Окно не открылось за 60 секунд. Проверьте журнал сервера через docker logs и повторите запуск.');
+    throw error;
+  } finally { clearTimeout(timeout); if (openRequest === request) openRequest = null; }
+}));
 bind($('#check-linkedin'), 'click', () => busy($('#check-linkedin'), status));
 bind($('#close-browser'), 'click', () => busy($('#close-browser'), async () => { clearBrowser(); await api('linkedin/release', {}); notice('Браузер закрыт. Сохранённая сессия останется доступна агенту.'); }));
 bind($('#hide-browser'), 'click', async () => { clearBrowser(); await api('linkedin/finish', {}); });

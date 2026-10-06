@@ -7,8 +7,9 @@ import { ConnectorError } from "../../src/errors.js";
 import { SerialQueue } from "../../src/browser/serial-queue.js";
 import type { User } from "./users.js";
 import { LoginScreen } from "./login-screen.js";
+import { loginPageState } from "./login-navigation.js";
 
-export interface LoginFrame { image?: string; version?: number; width: number; height: number; url: string; complete: boolean }
+export interface LoginFrame { image?: string; version?: number; width: number; height: number; url: string; complete: boolean; blocked?: boolean }
 export type BrowserInput = { type: "click"; x: number; y: number } | { type: "text"; text: string } | { type: "key"; key: string } | { type: "scroll"; delta: number };
 export interface UserRuntime {
   client: ConnectorClient;
@@ -18,7 +19,6 @@ export interface UserRuntime {
   finishLogin(): Promise<void>;
   close(): Promise<void>;
 }
-const loginUrl = (url: string) => /^https:\/\/(?:[a-z0-9-]+\.)?linkedin\.com\/(?:login|uas\/login|sales\/login|checkpoint|challenge|authwall|signup|start|psettings|oauth)/i.test(url);
 
 class Runtime implements UserRuntime {
   private readonly app: ConnectorApp;
@@ -65,9 +65,14 @@ class Runtime implements UserRuntime {
     await this.queue.run(async () => {
       await this.stopScreen();
       await this.app.browser.runExclusive(async page => {
-        await page.goto("https://www.linkedin.com/login", { waitUntil: "domcontentloaded" });
         const screen = new LoginScreen(page);
-        try { await screen.start(); this.screen = screen; }
+        try {
+          await screen.start();
+          // Resume verification instead of restarting it after a portal error.
+          // Start rendering first and wait only for the navigation response.
+          if (loginPageState(page.url()) === "external") await page.goto("https://www.linkedin.com/login", { waitUntil: "commit", timeout: 15_000 });
+          this.screen = screen;
+        }
         catch (error) { await screen.close(); throw error; }
       });
       this.loginUntil = Date.now() + 15 * 60_000;
@@ -87,15 +92,14 @@ class Runtime implements UserRuntime {
     }
     const page = screen.page, viewport = page.viewportSize() ?? { width: 1440, height: 1000 };
     const url = page.url();
-    const complete = /^https:\/\/(?:[a-z0-9-]+\.)?linkedin\.com\/(?:feed|sales\/(?!login)|in\/)/i.test(url);
+    const state = loginPageState(url), complete = state === "complete";
     if (complete) { this.loginUntil = 0; await this.stopScreen(); return { ...viewport, url, complete }; }
-    if (!loginUrl(url)) throw new ConnectorError("CHALLENGE_REQUIRED", "Страница входа не поддерживается. Обратитесь к администратору и проверьте журнал браузера.");
     // Cached frames are read independently of input/navigation operations.
-    return { ...viewport, url, complete, ...screen.read() };
+    return { ...viewport, url, complete, blocked: state === "external", ...screen.read() };
   }
   input(input: BrowserInput) {
     return this.loginTask(async page => {
-      if (!loginUrl(page.url())) throw new ConnectorError("AUTH_REQUIRED", "Окно входа уже закрыто. Проверьте статус подключения.");
+      if (loginPageState(page.url()) === "external") throw new ConnectorError("AUTH_REQUIRED", "Ввод разрешён только на HTTPS-страницах LinkedIn. Текущий адрес показан над окном.");
       if (input.type === "click") await page.mouse.click(input.x, input.y);
       if (input.type === "text") await page.keyboard.insertText(input.text);
       if (input.type === "key") await page.keyboard.press(input.key);

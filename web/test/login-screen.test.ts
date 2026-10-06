@@ -12,6 +12,7 @@ test("screen retains the latest frame and acknowledges only when the viewer read
   session.detach = async () => { calls.push({ method: "detach" }); };
   const screen = new LoginScreen({ async bringToFront() {}, context: () => ({ newCDPSession: async () => session }) } as unknown as Page);
   await screen.start();
+  assert.ok(!calls.some(call => call.method === "Page.captureScreenshot"), "Opening must not wait for an initial screenshot");
   session.emit("Page.screencastFrame", { data: "old", sessionId: 1 });
   session.emit("Page.screencastFrame", { data: "new", sessionId: 2 });
   assert.equal(calls.filter(call => call.method === "Page.screencastFrameAck").length, 0);
@@ -42,7 +43,8 @@ test("real Chrome updates frames after input without waiting for web fonts", { s
     oldCapture = page.screenshot({ type: "jpeg", quality: 75 }).then(image => { oldFinished = true; return image; });
     const started = performance.now();
     await screen.start();
-    const first = screen.read();
+    let first = screen.read();
+    for (let attempt = 0; attempt < 20 && !first.image; attempt++) { await delay(50); first = screen.read(); }
     assert.ok(first.image);
     assert.equal(oldFinished, false);
     assert.equal(await page.evaluate(() => document.fonts.status), "loading");
@@ -60,4 +62,28 @@ test("real Chrome updates frames after input without waiting for web fonts", { s
     await oldCapture?.catch(() => {});
     await screen.close(); await browser.close();
   }
+});
+
+test("Chrome streams a loading page when navigation starts after the stream", { skip: process.env.WEB_BROWSER_TESTS !== "1", timeout: 20_000 }, async () => {
+  const browser = await chromium.launch({ channel: "chrome", headless: true });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } }), screen = new LoginScreen(page);
+  let releaseScript!: () => void;
+  const scriptGate = new Promise<void>(resolve => { releaseScript = resolve; });
+  try {
+    await page.route("https://www.linkedin.com/login", route => route.fulfill({ contentType: "text/html", body: '<h1>Loading test</h1><script src="/delayed-test.js"></script>' }));
+    await page.route("https://www.linkedin.com/delayed-test.js", async route => { await scriptGate; await route.fulfill({ contentType: "text/javascript", body: "" }); });
+    await screen.start();
+    await page.goto("https://www.linkedin.com/login", { waitUntil: "commit", timeout: 5_000 });
+    assert.equal(await page.evaluate(() => document.readyState), "loading");
+    let first = screen.read();
+    for (let attempt = 0; attempt < 20 && !first.image; attempt++) { await delay(50); first = screen.read(); }
+    assert.ok(first.image);
+    assert.equal(await page.evaluate(() => document.readyState), "loading");
+    releaseScript(); await page.waitForLoadState("domcontentloaded");
+    const previous = first.version;
+    await page.evaluate(() => { document.body.style.background = "red"; });
+    let next = screen.read();
+    for (let attempt = 0; attempt < 20 && next.version <= previous; attempt++) { await delay(50); next = screen.read(); }
+    assert.ok(next.version > previous);
+  } finally { releaseScript(); await screen.close(); await browser.close(); }
 });

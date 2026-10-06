@@ -126,7 +126,15 @@ export function createWebServer(options: WebOptions) {
       }
       if (req.method === "POST" && url.pathname === "/api/token") return success({ token: options.users.rotateToken(user.id), mcpUrl: `${publicUrl.origin}/mcp` });
       if (req.method === "POST" && url.pathname === "/api/token/revoke") { options.users.revokeToken(user.id); return success({}); }
-      if (req.method === "POST" && url.pathname === "/api/linkedin/open") { await options.runtimes.get(user).openLogin(); return success({}); }
+      if (req.method === "POST" && url.pathname === "/api/linkedin/open") {
+        try { await options.runtimes.get(user).openLogin(); }
+        catch (error) {
+          console.error("LinkedIn browser startup failed:", error instanceof Error ? error.message : "Unknown error");
+          if (error instanceof ConnectorError) throw error;
+          throw new ConnectorError("BROWSER_ERROR", "Не удалось открыть браузер LinkedIn. Причина записана в журнал сервера; проверьте docker logs.");
+        }
+        return success({});
+      }
       if (req.method === "GET" && url.pathname === "/api/linkedin/stream") {
         if ([...streams.values()].filter(stream => stream.userId === user.id).length >= 2) throw new HttpError(429, "LIMIT_REACHED", "Закройте лишние окна авторизации.");
         const runtime = options.runtimes.get(user), controller = new AbortController();
