@@ -8,7 +8,7 @@
 
 Подробный сценарий для Ubuntu с командами и ожидаемыми результатами: [пошаговая инструкция ниже](#пошагово-ubuntu-сервер-и-домен).
 
-Нужны Linux x86_64, Docker Engine и Docker Compose. Образ устанавливает Google Chrome; сборка на ARM в этой конфигурации не поддерживается. Домен и внешний порт можно выбрать любые. У каждого Compose-проекта свои сеть и том; жёстко заданного имени контейнера нет.
+Нужны Linux x86_64, Docker Engine и Docker Compose. Образ устанавливает Google Chrome; сборка на ARM в этой конфигурации не поддерживается. Можно использовать домен либо IP, а внешний порт выбрать свободный. Без домена см. [доступ по IP](#доступ-по-ip-без-домена). У каждого Compose-проекта свои сеть и том; жёстко заданного имени контейнера нет.
 
 Из корня всего репозитория:
 
@@ -35,11 +35,274 @@ docker compose --project-name linkedin-mcp --env-file web/.env -f web/compose.ya
 
 На сервере будет доступен `127.0.0.1:3081`; внутренний порт — `3000`. Это позволяет разместить приложение рядом с другими контейнерами. Для второй установки задайте другой project name и внешний порт. Образ использует [браузер и зависимости Playwright](https://playwright.dev/docs/browsers).
 
-Настройте существующий Nginx по [примеру](deploy/nginx.conf.example), заменив домен, порт и пути к TLS-сертификатам. `WEB_PUBLIC_URL` должен точно совпадать с адресом, который видят пользователи, включая нестандартный HTTPS-порт. Приложение рассчитано на отдельный домен/поддомен и корневой путь `/`, а не на подпуть `/linkedin/`.
+Для доменного режима настройте существующий Nginx по [примеру](deploy/nginx.conf.example), заменив домен, порт и пути к TLS-сертификатам. `WEB_PUBLIC_URL` должен точно совпадать с адресом, который видят пользователи, включая протокол и нестандартный порт. Приложение использует корневой путь `/` домена или IP, а не подпуть `/linkedin/`.
 
 Если Nginx тоже находится в Docker, подключите его к сети этого Compose-проекта и проксируйте на `http://linkedin-mcp:3000`. `127.0.0.1` внутри контейнера Nginx указывает на сам Nginx, а не на хост. При использовании общей внешней сети можно добавить её через собственный Compose override; публиковать дополнительный порт не требуется. Если на одной общей сети размещены несколько экземпляров, назначьте им разные сетевые aliases.
 
 Порт HTTP приложения по умолчанию опубликован только на loopback. Снаружи доступен Nginx с HTTPS. Публичная административная панель защищена логином и паролем. MCP требует отдельный персональный ключ.
+
+## Доступ по IP без домена
+
+Можно выбрать один из двух режимов:
+
+| Режим | Адрес портала | Домен и DNS | TLS |
+| --- | --- | --- | --- |
+| HTTPS по IP | `https://IP:8443` | Не требуются | Сертификат для IP на Nginx |
+| Прямой HTTP по IP | `http://IP:3081` | Не требуются | Нет; нужен `WEB_ALLOW_HTTP_IP=true` |
+
+`WEB_PUBLIC_URL` задаёт один основной адрес для портала и MCP. Открывайте портал по этому же адресу, включая протокол и порт: проверка Origin сравнивает запросы с ним. Персональные аккаунты, ключи и сессии LinkedIn работают в обоих режимах.
+
+### Прямой HTTP по IP
+
+Для HTTP пароли портала, ввод при входе в LinkedIn и MCP-ключи передаются без шифрования. Используйте этот режим в доверенной сети/VPN или для временного тестирования; для публичной работы ниже есть HTTPS по IP. Некоторые агенты разрешают удалённый MCP только по HTTPS.
+
+Все команды этого раздела выполняются **в Bash через SSH на Ubuntu**. Docker должен быть установлен; если его нет, выполните шаг 4 основной инструкции. Для новой установки скачайте проект:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git curl openssl
+mkdir -p "$HOME/apps"
+git clone https://github.com/RusAbk/linkedin_mcp.git "$HOME/apps/linkedin-mcp"
+```
+
+Если репозиторий уже есть, вместо `git clone` обновите его:
+
+```bash
+cd "$HOME/apps/linkedin-mcp"
+git status --short
+git pull --ff-only origin main
+```
+
+**1. Задайте IP и порт.** Замените `203.0.113.10` реальным адресом сервера:
+
+```bash
+SERVER_IP='203.0.113.10'
+APP_PORT='3081'
+APP_DIR="$HOME/apps/linkedin-mcp"
+COMPOSE_PROJECT='linkedin-mcp'
+cd "$APP_DIR"
+sudo ss -ltnp "sport = :$APP_PORT"
+```
+
+При новой установке порт должен быть свободен. Если занят другим приложением, выберите другой `APP_PORT`. Если на нём уже работает этот же Compose-проект, его обновление использует тот же порт.
+
+**2. Создайте начальный пароль, если конфигурации ещё нет.**
+
+```bash
+if [ ! -e web/.env ]; then
+  umask 077
+  ADMIN_PASSWORD="$(openssl rand -hex 24)"
+  cat > web/.env <<EOF
+WEB_ADMIN_USER=admin
+WEB_ADMIN_PASSWORD=$ADMIN_PASSWORD
+WEB_MAX_BROWSERS=8
+EOF
+  chmod 600 web/.env
+  printf 'Логин: admin\nПароль: %s\n' "$ADMIN_PASSWORD"
+  unset ADMIN_PASSWORD
+fi
+```
+
+Сохраните напечатанный пароль. У существующей установки файл и пароль администратора сохраняются.
+
+**3. Включите HTTP по IP и публикацию отдельного порта.** Функция ниже меняет только указанные настройки; пароль и остальные строки сохраняются:
+
+```bash
+set_web_setting() {
+  setting_key="$1"
+  setting_value="$2"
+  if grep -q "^$setting_key=" web/.env; then
+    sed -i "s|^$setting_key=.*|$setting_key=$setting_value|" web/.env
+  else
+    printf '%s=%s\n' "$setting_key" "$setting_value" >> web/.env
+  fi
+}
+set_web_setting WEB_PUBLIC_URL "http://$SERVER_IP:$APP_PORT"
+set_web_setting WEB_ALLOW_HTTP_IP true
+set_web_setting WEB_BIND_ADDRESS 0.0.0.0
+set_web_setting WEB_EXTERNAL_PORT "$APP_PORT"
+chmod 600 web/.env
+grep -E '^(WEB_PUBLIC_URL|WEB_ALLOW_HTTP_IP|WEB_BIND_ADDRESS|WEB_EXTERNAL_PORT)=' web/.env
+```
+
+Ожидается ваш IP, выбранный порт, `WEB_ALLOW_HTTP_IP=true` и `WEB_BIND_ADDRESS=0.0.0.0`. Флаг по умолчанию выключен и разрешает только буквальные IPv4/IPv6-адреса; HTTP для доменных имён этим флагом не включается.
+
+**4. Соберите и запустите контейнер.**
+
+```bash
+sudo docker compose --project-name "$COMPOSE_PROJECT" --env-file web/.env -f web/compose.yaml up -d --build
+sudo docker compose --project-name "$COMPOSE_PROJECT" --env-file web/.env -f web/compose.yaml ps
+curl --fail "http://127.0.0.1:$APP_PORT/healthz"
+printf '\n'
+```
+
+Ожидается `{"ok":true}`. Nginx для этого режима не нужен, а уже работающие сайты и их порты 80/443 не меняются.
+
+**5. Разрешите внешний доступ к выбранному TCP-порту в панели хостинга.** Можно ограничить источники своей сетью/VPN. При активном UFW:
+
+```bash
+sudo ufw allow "$APP_PORT/tcp"
+```
+
+Опубликованные Docker-порты могут проходить мимо правил UFW; внешние ограничения задавайте также в firewall хостинга или правилах Docker. Подробнее — [сетевые ограничения Docker на Ubuntu](https://docs.docker.com/engine/install/ubuntu/#firewall-limitations).
+
+Проверка с вашего компьютера, в PowerShell:
+
+```powershell
+curl.exe --fail http://203.0.113.10:3081/healthz
+```
+
+Замените IP и порт на свои. Ожидается `{"ok":true}`.
+
+**6. Откройте портал и подключите MCP.** В браузере: `http://ВАШ_IP:ПОРТ`. После входа и авторизации в LinkedIn создайте ключ. MCP URL будет `http://ВАШ_IP:ПОРТ/mcp`.
+
+Кнопка копирования конфигурации учитывает ограничения HTTP: если автоматическое копирование запрещено, портал покажет выделенную конфигурацию для Ctrl+C / Cmd+C. При выходе, отзыве и замене ключа это поле очищается.
+
+Для IPv6 URL записывается со скобками, например `http://[2001:db8::10]:3081`; при публикации Docker-порта на IPv6 задайте `WEB_BIND_ADDRESS=[::]`. Адрес и IPv6-подключение хоста должны быть настроены.
+
+### HTTPS по IP
+
+Для обычного публичного использования можно получить доверенный сертификат без домена: [Let’s Encrypt поддерживает IP-сертификаты](https://letsencrypt.org/2026/01/15/6day-and-ip-general-availability). Они короткоживущие — примерно шесть дней, поэтому нужно автоматическое продление. Для команд ниже требуется Certbot **5.4+** с webroot-поддержкой IP: [официальный пример](https://letsencrypt.org/2026/03/11/shorter-certs-certbot).
+
+Этот маршрут рассчитан на публичный IPv4 и Nginx на хосте. Порт приложения остаётся локальным, порт HTTPS выбирается отдельно: пример использует `8443`, чтобы сосуществовать с сайтами на 443. Для IP некоторые TLS-клиенты не отправляют SNI, поэтому отдельный свободный HTTPS-порт даёт предсказуемый выбор сертификата.
+
+Сначала скачайте/обновите проект, установите Docker и создайте `web/.env` как в предыдущем разделе. Задайте переменные и определите `set_web_setting` из пункта 3, но HTTP-публикацию включать не требуется:
+
+```bash
+SERVER_IP='203.0.113.10'
+APP_PORT='3081'
+IP_HTTPS_PORT='8443'
+APP_DIR="$HOME/apps/linkedin-mcp"
+COMPOSE_PROJECT='linkedin-mcp'
+ACME_ROOT="/var/www/$COMPOSE_PROJECT-acme"
+CERT_NAME="$COMPOSE_PROJECT-ip"
+cd "$APP_DIR"
+
+set_web_setting WEB_PUBLIC_URL "https://$SERVER_IP:$IP_HTTPS_PORT"
+set_web_setting WEB_ALLOW_HTTP_IP false
+set_web_setting WEB_BIND_ADDRESS 127.0.0.1
+set_web_setting WEB_EXTERNAL_PORT "$APP_PORT"
+
+sudo docker compose --project-name "$COMPOSE_PROJECT" --env-file web/.env -f web/compose.yaml up -d --build
+curl --fail "http://127.0.0.1:$APP_PORT/healthz"
+```
+
+Ожидается `{"ok":true}`. Установите/используйте Nginx на хосте по шагу 8 основной инструкции. В firewall хостинга разрешите TCP 80 и выбранный HTTPS-порт 8443; проверьте, что он свободен:
+
+```bash
+sudo ss -ltnp "sport = :$IP_HTTPS_PORT"
+sudo install -d -m 0755 "$ACME_ROOT/.well-known/acme-challenge"
+```
+
+Добавьте **отдельный** HTTP-виртуальный хост для IP. Его ACME-путь нужен для выпуска и продления сертификата:
+
+```bash
+sudo tee "/etc/nginx/sites-available/$COMPOSE_PROJECT-ip" >/dev/null <<EOF
+server {
+    listen 80;
+    server_name $SERVER_IP;
+    location ^~ /.well-known/acme-challenge/ {
+        root $ACME_ROOT;
+        default_type text/plain;
+    }
+    location / {
+        proxy_pass http://127.0.0.1:$APP_PORT;
+    }
+}
+EOF
+if [ ! -e "/etc/nginx/sites-enabled/$COMPOSE_PROJECT-ip" ] && [ ! -L "/etc/nginx/sites-enabled/$COMPOSE_PROJECT-ip" ]; then
+  sudo ln -s "/etc/nginx/sites-available/$COMPOSE_PROJECT-ip" "/etc/nginx/sites-enabled/$COMPOSE_PROJECT-ip"
+fi
+sudo nginx -t
+```
+
+После успешной проверки:
+
+```bash
+sudo systemctl reload nginx
+curl --fail "http://$SERVER_IP/healthz"
+```
+
+Для проверки извне выполните `curl.exe --fail http://ВАШ_IP/healthz` с вашего Windows-компьютера. Ожидается `{"ok":true}`.
+
+Установите Certbot по шагу 11 основной инструкции либо используйте существующую установку. Задайте его путь и проверьте версию:
+
+```bash
+CERTBOT_BIN='/snap/bin/certbot'
+"$CERTBOT_BIN" --version
+```
+
+Для другого способа установки задайте соответствующий путь. Версия должна быть не ниже 5.4. Выпустите сертификат через webroot, сохраняя Nginx и другие сайты работающими:
+
+```bash
+sudo "$CERTBOT_BIN" certonly --webroot --webroot-path "$ACME_ROOT" \
+  --preferred-profile shortlived --ip-address "$SERVER_IP" --cert-name "$CERT_NAME"
+```
+
+Пройдите диалог email и условий сертификата. После успешного выпуска настройте оба виртуальных хоста в том же отдельном файле:
+
+```bash
+sudo tee "/etc/nginx/sites-available/$COMPOSE_PROJECT-ip" >/dev/null <<EOF
+server {
+    listen 80;
+    server_name $SERVER_IP;
+    location ^~ /.well-known/acme-challenge/ {
+        root $ACME_ROOT;
+        default_type text/plain;
+    }
+    location / {
+        return 301 https://$SERVER_IP:$IP_HTTPS_PORT\$request_uri;
+    }
+}
+server {
+    listen $IP_HTTPS_PORT ssl;
+    server_name $SERVER_IP;
+    ssl_certificate /etc/letsencrypt/live/$CERT_NAME/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$CERT_NAME/privkey.pem;
+    client_max_body_size 64k;
+    location / {
+        proxy_pass http://127.0.0.1:$APP_PORT;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_buffering off;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+    }
+}
+EOF
+sudo nginx -t
+```
+
+После успешной проверки:
+
+```bash
+sudo systemctl reload nginx
+curl --fail "https://$SERVER_IP:$IP_HTTPS_PORT/healthz"
+```
+
+Ожидается `{"ok":true}` без отключения проверки TLS. Не используйте `curl -k` как решение ошибок сертификата.
+
+Добавьте загрузку обновлённого сертификата после автоматического продления:
+
+```bash
+sudo install -d -m 0755 /etc/letsencrypt/renewal-hooks/deploy
+sudo tee "/etc/letsencrypt/renewal-hooks/deploy/$COMPOSE_PROJECT-nginx.sh" >/dev/null <<'EOF'
+#!/bin/sh
+/usr/sbin/nginx -t && /usr/bin/systemctl reload nginx
+EOF
+sudo chmod 0750 "/etc/letsencrypt/renewal-hooks/deploy/$COMPOSE_PROJECT-nginx.sh"
+sudo "$CERTBOT_BIN" renew --cert-name "$CERT_NAME" --dry-run --run-deploy-hooks
+systemctl list-timers --all | grep -i certbot
+```
+
+Ожидается успешная проверка продления и настроенный таймер Certbot. Если таймера нет, настройте автоматическое продление по способу установки Certbot до публичного использования. Порт 80 и ACME-путь оставьте доступными для продления.
+
+Теперь портал: `https://ВАШ_IP:8443`, MCP: `https://ВАШ_IP:8443/mcp`. DNS и домен не нужны, `WEB_ALLOW_HTTP_IP` остаётся `false`.
+
+При смене IP получите сертификат для нового адреса и обновите `WEB_PUBLIC_URL` и Nginx. После изменения основного адреса повторите `docker compose ... up -d` и получите новую конфигурацию MCP в портале; старые конфигурации агента автоматически не меняются.
+
 
 ## Пошагово Ubuntu сервер и домен
 

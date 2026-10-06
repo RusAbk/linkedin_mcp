@@ -3,7 +3,8 @@ let csrf = '', currentUser = null, mcpUrl = '', personalToken = '', frame = null
 let browserQueue = Promise.resolve();
 function notice(message, error = false) { $('#notice').hidden = false; $('#notice').textContent = message; $('#notice').classList.toggle('error', error); }
 function clearBrowser() { clearTimeout(timer); polling = false; frame = null; $('#browser-panel').hidden = true; $('#browser-image').removeAttribute('src'); $('#browser-text-form').reset(); }
-function leave() { csrf = ''; currentUser = null; personalToken = ''; clearBrowser(); $('#configuration').hidden = true; $('#config-json').textContent = ''; $('#mcp-token').value = ''; $('#workspace').hidden = true; $('#login-view').hidden = false; $('#users-list').replaceChildren(); }
+function clearManualCopy() { $('#manual-copy').hidden = true; $('#manual-config').value = ''; }
+function leave() { csrf = ''; currentUser = null; personalToken = ''; clearBrowser(); clearManualCopy(); $('#configuration').hidden = true; $('#config-json').textContent = ''; $('#mcp-token').value = ''; $('#workspace').hidden = true; $('#login-view').hidden = false; $('#users-list').replaceChildren(); }
 async function api(path, data) {
   const response = await fetch(`/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: data === undefined ? {} : { 'content-type': 'application/json', 'x-csrf-token': csrf }, ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
   const payload = await response.json();
@@ -38,10 +39,22 @@ for (const button of document.querySelectorAll('[data-key]')) bind(button, 'clic
 bind($('#scroll-up'), 'click', () => input({ type: 'scroll', delta: -500 }));
 bind($('#scroll-down'), 'click', () => input({ type: 'scroll', delta: 500 }));
 function config() { return { mcpServers: { linkedin: { url: mcpUrl, headers: { Authorization: `Bearer ${personalToken}` } } } }; }
-bind($('#create-token'), 'click', () => busy($('#create-token'), async () => { const result = await api('token', {}); personalToken = result.token; $('#mcp-token').value = personalToken; $('#mcp-token').type = 'password'; $('#show-token').textContent = 'Показать ключ'; $('#configuration').hidden = false; $('#config-json').textContent = JSON.stringify({ mcpServers: { linkedin: { url: mcpUrl, headers: { Authorization: 'Bearer <ваш персональный ключ>' } } } }, null, 2); notice('Персональный ключ создан. Скопируйте конфигурацию; предыдущий ключ отозван.'); }));
-bind($('#revoke-token'), 'click', () => busy($('#revoke-token'), async () => { await api('token/revoke', {}); personalToken = ''; $('#configuration').hidden = true; $('#mcp-token').value = ''; notice('MCP-ключ отозван. Новые запросы агента будут отклонены.'); }));
+bind($('#create-token'), 'click', () => busy($('#create-token'), async () => { const result = await api('token', {}); clearManualCopy(); personalToken = result.token; $('#mcp-token').value = personalToken; $('#mcp-token').type = 'password'; $('#show-token').textContent = 'Показать ключ'; $('#configuration').hidden = false; $('#config-json').textContent = JSON.stringify({ mcpServers: { linkedin: { url: mcpUrl, headers: { Authorization: 'Bearer <ваш персональный ключ>' } } } }, null, 2); notice('Персональный ключ создан. Скопируйте конфигурацию; предыдущий ключ отозван.'); }));
+bind($('#revoke-token'), 'click', () => busy($('#revoke-token'), async () => { await api('token/revoke', {}); clearManualCopy(); personalToken = ''; $('#configuration').hidden = true; $('#mcp-token').value = ''; notice('MCP-ключ отозван. Новые запросы агента будут отклонены.'); }));
 bind($('#show-token'), 'click', () => { const field = $('#mcp-token'); field.type = field.type === 'password' ? 'text' : 'password'; $('#show-token').textContent = field.type === 'password' ? 'Показать ключ' : 'Скрыть ключ'; });
-bind($('#copy-config'), 'click', async () => { await navigator.clipboard.writeText(JSON.stringify(config(), null, 2)); notice('Конфигурация с персональным ключом скопирована. Вставьте её в настройки MCP вашего агента.'); });
+bind($('#copy-config'), 'click', async () => {
+  if (!personalToken) throw new Error('Сначала создайте MCP-ключ.');
+  const text = JSON.stringify(config(), null, 2);
+  if (navigator.clipboard?.writeText) {
+    try { await navigator.clipboard.writeText(text); clearManualCopy(); notice('Конфигурация с персональным ключом скопирована. Вставьте её в настройки MCP вашего агента.'); return; }
+    catch { /* The browser can also deny clipboard access on HTTPS. */ }
+  }
+  $('#manual-copy').hidden = false;
+  $('#manual-config').value = text;
+  $('#manual-config').focus();
+  $('#manual-config').select();
+  notice('Браузер не разрешил автоматическое копирование. Конфигурация выделена ниже: нажмите Ctrl+C (или Cmd+C) и вставьте её в агент.');
+});
 bind($('#password-form'), 'submit', () => busy($('#password-form button'), async () => { const form = $('#password-form'); await api('password', { currentPassword: form.elements.currentPassword.value, password: form.elements.password.value }); form.reset(); leave(); $('#login-error').textContent = 'Пароль изменён. Войдите с новым паролем.'; }));
 bind($('#create-user'), 'submit', () => busy($('#create-user button'), async () => { const form = $('#create-user'); await api('admin/users', { username: form.elements.username.value, password: form.elements.password.value }); form.reset(); await users(); notice('Пользователь создан. Передайте ему адрес портала, логин и начальный пароль.'); }));
 async function users() {

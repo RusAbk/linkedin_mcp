@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { isIP } from "node:net";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { createMcpServer } from "../../src/mcp-server.js";
@@ -8,7 +9,7 @@ import { ConnectorError } from "../../src/errors.js";
 import { UserStore, type User } from "./users.js";
 import type { RuntimePool } from "./runtime.js";
 
-export interface WebOptions { publicUrl: string; publicDir: string; users: UserStore; runtimes: Pick<RuntimePool, "get" | "release"> }
+export interface WebOptions { publicUrl: string; publicDir: string; users: UserStore; runtimes: Pick<RuntimePool, "get" | "release">; allowHttpIp?: boolean }
 type Session = { userId: string; csrf: string; expires: number };
 class HttpError extends Error { constructor(public status: number, public code: string, message: string) { super(message); } }
 function json(res: ServerResponse, status: number, value: unknown) { res.writeHead(status, { "content-type": "application/json; charset=utf-8" }); res.end(JSON.stringify(value)); }
@@ -32,10 +33,19 @@ const browserInput = z.discriminatedUnion("type", [
 ]);
 const accountSchema = z.object({ username: z.string().regex(/^[a-zA-Z0-9_.-]{3,64}$/), password: z.string().min(16).max(512) }).strict();
 
+export function validatePublicUrl(value: string, allowHttpIp = false): URL {
+  const url = new URL(value);
+  if (url.pathname !== "/" || url.search || url.hash || url.username || url.password) throw new Error("WEB_PUBLIC_URL должен содержать только протокол, адрес и порт.");
+  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  const ip = isIP(url.hostname.replace(/^\[|\]$/g, "")) !== 0;
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && (loopback || (allowHttpIp && ip)))) {
+    throw new Error("Используйте HTTPS. HTTP по IP разрешается только при WEB_ALLOW_HTTP_IP=true; HTTP-домены не поддерживаются.");
+  }
+  return url;
+}
+
 export function createWebServer(options: WebOptions) {
-  const publicUrl = new URL(options.publicUrl);
-  if (publicUrl.pathname !== "/" || publicUrl.search || publicUrl.hash || publicUrl.username || publicUrl.password) throw new Error("WEB_PUBLIC_URL должен содержать только протокол, домен и порт.");
-  if (publicUrl.protocol !== "https:" && !(publicUrl.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(publicUrl.hostname))) throw new Error("Для удалённого доступа WEB_PUBLIC_URL должен использовать HTTPS.");
+  const publicUrl = validatePublicUrl(options.publicUrl, options.allowHttpIp);
   const sessions = new Map<string, Session>();
   const attempts = new Map<string, { count: number; expires: number }>();
   const requests = new Set<Promise<unknown>>();

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { UserStore, type User } from "../src/users.js";
-import { createWebServer } from "../src/server.js";
+import { createWebServer, validatePublicUrl } from "../src/server.js";
 import { RuntimePool, type UserRuntime } from "../src/runtime.js";
 import type { ConnectorClient } from "../../src/worker/protocol.js";
 import { ConnectorError } from "../../src/errors.js";
@@ -17,7 +17,7 @@ function remove(directory: string) {
   assert.ok(path.resolve(directory).startsWith(root));
   rmSync(directory, { recursive: true, force: true });
 }
-async function fixture() {
+async function fixture(settings: { publicUrl?: string; allowHttpIp?: boolean } = {}) {
   const directory = temp();
   const users = new UserStore(path.join(directory, "users.sqlite"));
   const admin = users.create("admin", password, "admin");
@@ -36,7 +36,7 @@ async function fixture() {
     },
     async release() {},
   };
-  const app = createWebServer({ publicUrl: "http://localhost:3000", publicDir: path.resolve(import.meta.dirname, "../public"), users, runtimes });
+  const app = createWebServer({ publicUrl: settings.publicUrl ?? "http://localhost:3000", allowHttpIp: settings.allowHttpIp ?? false, publicDir: path.resolve(import.meta.dirname, "../public"), users, runtimes });
   await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
   const address = app.server.address(); assert.ok(address && typeof address !== "string");
   const base = `http://127.0.0.1:${address.port}`;
@@ -151,4 +151,48 @@ test("real core uses separate operation databases and lazy browsers per user", a
     assert.equal((await pool.get(alice).client.health()).browser.running, false);
     assert.equal((await pool.get(alice).client.getOperation("shared-operation")).request.owner, "alice");
   } finally { await pool.close(); users.close(); remove(directory); }
+});
+
+test("HTTPS IP works by default, while remote HTTP requires an explicit IP-only opt-in", () => {
+  assert.equal(validatePublicUrl("https://203.0.113.10:8443").origin, "https://203.0.113.10:8443");
+  assert.equal(validatePublicUrl("https://[2001:db8::10]").origin, "https://[2001:db8::10]");
+  assert.equal(validatePublicUrl("http://localhost:3000").origin, "http://localhost:3000");
+  assert.throws(() => validatePublicUrl("http://203.0.113.10:3081"), /WEB_ALLOW_HTTP_IP/);
+  assert.throws(() => validatePublicUrl("http://[2001:db8::10]:3081"), /WEB_ALLOW_HTTP_IP/);
+  assert.equal(validatePublicUrl("http://203.0.113.10:3081", true).origin, "http://203.0.113.10:3081");
+  assert.equal(validatePublicUrl("http://[2001:db8::10]:3081", true).origin, "http://[2001:db8::10]:3081");
+  for (const value of ["http://example.com", "ftp://203.0.113.10", "https://user:password@203.0.113.10", "https://203.0.113.10/subpath", "https://203.0.113.10/?key=secret"]) {
+    assert.throws(() => validatePublicUrl(value, true));
+  }
+});
+
+test("HTTP IP login generates the correct MCP URL and retains origin, CSRF and bearer protection", async () => {
+  const origin = "http://203.0.113.10:3081";
+  const f = await fixture({ publicUrl: origin, allowHttpIp: true });
+  try {
+    const response = await f.post("/api/login", { "content-type": "application/json", origin }, { username: "alice", password });
+    assert.equal(response.status, 200);
+    const cookie = response.headers.get("set-cookie")!;
+    assert.match(cookie, /HttpOnly/); assert.match(cookie, /SameSite=Strict/); assert.doesNotMatch(cookie, /; Secure/);
+    const data = (await response.json() as { data: { csrf: string; mcpUrl: string } }).data;
+    assert.equal(data.mcpUrl, `${origin}/mcp`);
+    const headers = { cookie: cookie.split(";")[0]!, "x-csrf-token": data.csrf, "content-type": "application/json", origin };
+    assert.equal((await f.post("/api/token", { ...headers, "x-csrf-token": "wrong" })).status, 403);
+    assert.equal((await f.post("/api/token", { ...headers, origin: "http://203.0.113.11:3081" })).status, 403);
+    const tokenResponse = await f.post("/api/token", headers);
+    const tokenData = (await tokenResponse.json() as { data: { token: string; mcpUrl: string } }).data;
+    assert.equal(tokenData.mcpUrl, `${origin}/mcp`);
+    assert.equal((await f.rpc(tokenData.token, "tools/list")).status, 200);
+    assert.equal((await f.rpc("invalid", "tools/list")).status, 401);
+  } finally { await f.close(); }
+});
+
+test("HTTPS IP cookies remain Secure without the HTTP opt-in", async () => {
+  const f = await fixture({ publicUrl: "https://203.0.113.10" });
+  try {
+    const response = await f.post("/api/login", { "content-type": "application/json", origin: "https://203.0.113.10" }, { username: "alice", password });
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("set-cookie")!, /; Secure/);
+    assert.equal((await response.json() as { data: { mcpUrl: string } }).data.mcpUrl, "https://203.0.113.10/mcp");
+  } finally { await f.close(); }
 });

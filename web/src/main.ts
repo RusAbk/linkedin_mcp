@@ -2,11 +2,17 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { UserStore } from "./users.js";
 import { RuntimePool } from "./runtime.js";
-import { createWebServer } from "./server.js";
+import { createWebServer, validatePublicUrl } from "./server.js";
 
 process.umask(0o077);
 const publicDir = fileURLToPath(new URL("../public", import.meta.url));
 const webRoot = fileURLToPath(new URL(import.meta.url.endsWith(".ts") ? "../" : "../../../", import.meta.url));
+const publicUrl = process.env.WEB_PUBLIC_URL ?? `http://localhost:${process.env.WEB_PORT ?? 3000}`;
+const allowHttpIp = process.env.WEB_ALLOW_HTTP_IP === "true";
+const publicAddress = validatePublicUrl(publicUrl, allowHttpIp);
+if (publicAddress.protocol === "http:" && !["localhost", "127.0.0.1", "[::1]"].includes(publicAddress.hostname)) {
+  console.warn("HTTP access by IP is enabled: portal passwords, LinkedIn login input and MCP keys are transmitted without TLS. Use HTTPS for untrusted networks.");
+}
 const dataRoot = path.resolve(process.env.WEB_DATA_DIR ?? path.join(webRoot, ".data"));
 const users = new UserStore(path.join(dataRoot, "users.sqlite"));
 if (!users.list().length) {
@@ -19,7 +25,7 @@ if (!Number.isInteger(maxBrowsers) || maxBrowsers < 1) throw new Error("Неко
 const runtimes = new RuntimePool(dataRoot, webRoot, maxBrowsers);
 const port = Number(process.env.WEB_PORT ?? 3000);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Некорректный WEB_PORT.");
-const app = createWebServer({ publicUrl: process.env.WEB_PUBLIC_URL ?? `http://localhost:${port}`, publicDir, users, runtimes });
+const app = createWebServer({ publicUrl, publicDir, users, runtimes, allowHttpIp });
 app.server.listen(port, process.env.WEB_HOST ?? "127.0.0.1", () => console.log(`LinkedIn MCP Portal listening on port ${port}`));
 let closing = false;
 async function shutdown() {
